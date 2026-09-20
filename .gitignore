@@ -1,0 +1,9 @@
+node_modules/
+/dist/
+sessions/
+runtime/
+.pagent/
+.pagent-state/
+*.log
+*.tgz
+!/vendor/pi-browser-0.1.0.tgz

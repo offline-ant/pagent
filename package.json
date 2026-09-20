@@ -1,0 +1,43 @@
+{
+  "name": "pagent",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "pagent": "dist/main.js"
+  },
+  "files": [
+    "dist",
+    "template",
+    "vendor",
+    "README.md"
+  ],
+  "bundleDependencies": [
+    "@earendil-works/pi-agent-core",
+    "@earendil-works/pi-ai",
+    "@earendil-works/pi-coding-agent",
+    "parse5",
+    "pi-browser",
+    "typebox"
+  ],
+  "description": "A self-modifiable browser workspace powered by the Pi SDK",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "node dist/main.js",
+    "compile": "node scripts/compile.mjs",
+    "check": "tsc --noEmit && node --check template/agent.js && node --check template/agent-output.js && node --check template/dom.js && node --check template/paragraphs.js && node --check template/p-agent.js && node --check template/user-input.js && node --check template/agent-connection.js && node --check template/agent-controls.js"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.85.1",
+    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "parse5": "8.0.0",
+    "pi-browser": "file:vendor/pi-browser-0.1.0.tgz",
+    "typebox": "1.3.7"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "typescript": "5.9.3"
+  }
+}

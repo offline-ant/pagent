@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pagent · browser workspace</title>
+  <link rel="stylesheet" href="/agent.css">
+  <script type="module" src="/agent.js"></script>
+</head>
+<body>
+  <header class="page-header">
+    <a class="wordmark" href="/">pagent<span class="wordmark-dot">.</span></a>
+    <span class="page-caption">A document you can think with.</span>
+  </header>
+  <main class="workspace">
+    <aside class="memory-panel">
+      <div class="eyebrow">Working memory</div>
+      <p class="hint">Included in every request. Edit freely; save to keep it after reload.</p>
+      <agent-memory contenteditable="plaintext-only" role="textbox" aria-label="Agent working memory" aria-multiline="true"><p>This page is our shared workspace. Keep durable notes here and link to larger documents when needed.</p></agent-memory>
+      <div class="memory-footnote">The interface is yours, too.<br><code>/agent.js</code> · <code>/agent.css</code></div>
+    </aside>
+    <p-agent id="main" aria-label="Conversation">
+      <user-input id="prompt-0"></user-input>
+    </p-agent>
+  </main>
+  <footer class="page-footer">Live state lives in this tab. Save writes the document; reload starts its scripts again.</footer>
+</body>
+</html>

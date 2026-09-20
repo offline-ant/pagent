@@ -1,0 +1,13 @@
+/* Browser defaults, with only spacing, readable text and subdued timestamps. */
+:host, p-agent, agent-memory, user-input, agent-output { display: block; }
+user-input, agent-output, .paragraph { margin-block: 1em; }
+.editor { min-height: 3em; border: 1px solid #ccc; padding: .25em; }
+.editor, agent-memory, .paragraph-text, .prose, .notice, pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.paragraph-time { color: #999; font-size: .8em; }
+.response-heading span + span, .input-label span + span, .tool-state, .status { margin-inline-start: .5em; }
+.model { display: block; }
+.notice:empty { display: none; }
+img { max-width: 100%; }
+.paragraph-loading:not([hidden]) { display: block; width: .8em; height: .8em; margin-block: .5em; border: 2px solid #ddd; border-top-color: #888; border-radius: 50%; animation: paragraph-spin .8s linear infinite; }
+@keyframes paragraph-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .paragraph-loading:not([hidden]) { animation: none; } }
