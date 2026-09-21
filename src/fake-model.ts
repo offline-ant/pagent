@@ -3,7 +3,10 @@ import {
   fauxProvider,
   fauxThinking,
   fauxToolCall,
+  getCurrentSystemPrompt,
+  getCurrentTools,
   type FauxProviderHandle,
+  type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -17,6 +20,15 @@ export function createFakeModel(): FauxProviderHandle {
   });
 }
 
+/** What the model effectively receives: current prompt and tools, plus the conversation without system records. */
+function inspect(context: TranscriptContext): string {
+  return JSON.stringify({
+    systemPrompt: getCurrentSystemPrompt(context.messages),
+    tools: getCurrentTools(context.messages),
+    messages: context.messages.filter(message => message.role !== "system"),
+  });
+}
+
 export function prepareFakeResponse(fake: FauxProviderHandle, prompt: string): void {
   if (prompt === "/fake-wait") {
     fake.setResponses([async (_context, options) => {
@@ -26,7 +38,7 @@ export function prepareFakeResponse(fake: FauxProviderHandle, prompt: string): v
     return;
   }
   if (prompt === "/fake-inspect") {
-    fake.setResponses([(context) => fauxAssistantMessage(JSON.stringify(context))]);
+    fake.setResponses([context => fauxAssistantMessage(inspect(context))]);
     return;
   }
   if (prompt.startsWith("/fake-say ")) {
@@ -71,7 +83,7 @@ export function prepareFakeResponse(fake: FauxProviderHandle, prompt: string): v
     fake.setResponses([
       fauxAssistantMessage(fauxToolCall("web_fetch", { url: url.href }), { stopReason: "toolUse" }),
       context => fauxAssistantMessage(JSON.stringify({
-        tools: context.tools?.map(tool => ({ name: tool.name })),
+        tools: getCurrentTools(context.messages).map(tool => ({ name: tool.name })),
         result: context.messages.findLast(message => message.role === "toolResult"),
       })),
     ]);
@@ -83,7 +95,7 @@ export function prepareFakeResponse(fake: FauxProviderHandle, prompt: string): v
         fauxToolCall("web_search", { query: "pagent test", max_results: 3 }),
         fauxToolCall("web_fetch", { url: "https://example.com/reference" }),
       ], { stopReason: "toolUse" }),
-      (context) => fauxAssistantMessage(JSON.stringify(context)),
+      context => fauxAssistantMessage(inspect(context)),
     ]);
     return;
   }

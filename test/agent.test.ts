@@ -84,7 +84,8 @@ test(`${browserKind} context is exact and page-owned, with no AGENTS discovery o
     if (final?.role !== "assistant" || final.content[0]?.type !== "text") throw new Error("Missing inspection response");
     const context: unknown = JSON.parse(final.content[0].text);
     assert.ok(context && typeof context === "object" && "systemPrompt" in context && "messages" in context && "tools" in context);
-    assert.equal(context.systemPrompt, buildSystemPrompt(browserKind));
+    assert.equal(context.systemPrompt, buildSystemPrompt(browserKind), "Pi restores the prompt after the context hook appends live page context");
+    assert.doesNotMatch(JSON.stringify(events.filter(event => event.type === "message")), /"role":"system"/, "host-owned system messages never reach page output or history");
     assert.match(JSON.stringify(context.messages), /edited page-owned history/);
     assert.match(JSON.stringify(context.messages), /updated page memory/);
     assert.doesNotMatch(JSON.stringify(context.messages), /Pagent smoke complete/);
@@ -113,7 +114,12 @@ test("history validation preserves metadata and rejects malformed roles, partial
   assistant.content.push({ type: "thinking", thinking: "visible reasoning", thinkingSignature: "opaque-provider-token" });
   const result = { role: "toolResult", toolCallId: "call-1", toolName: "console", content: [{ type: "text", text: "1" }], isError: false, timestamp: 2 };
   assert.deepEqual(validateHistory([assistant, result]), [assistant, result]);
-  assert.throws(() => validateHistory([{ role: "system", content: "bypass" }]), /Invalid completed message/);
+  assert.throws(() => validateHistory([{ role: "system", content: "bypass", timestamp: 1 }]), /Invalid completed message/);
+  const nested = { ...result, details: { list: [1, "two", null, { deep: true }] } };
+  assert.deepEqual(validateHistory([assistant, nested]), [assistant, nested]);
+  assert.throws(() => validateHistory([assistant, { ...result, details: { value: undefined } }]), /Invalid completed message/);
+  assert.throws(() => validateHistory([{ ...assistant, content: [{ ...assistant.content[0], arguments: { code: () => 1 } }] }]), /Invalid completed message/);
+  assert.throws(() => validateHistory([{ ...assistant, content: [{ ...assistant.content[0], arguments: ["not", "an", "object"] }] }]), /Invalid completed message/);
   assert.throws(() => validateHistory([{ ...assistant, stopReason: "pending" }]), /Invalid completed message/);
   assert.throws(() => validateHistory([assistant]), /unanswered tool calls/);
   assert.throws(() => validateHistory([result]), /Orphaned/);
@@ -189,7 +195,7 @@ for (const fake of [true, false]) {
       assert.ok(results.every(result => !result.isError));
       assert.match(JSON.stringify(results), /https:\/\/example.com\/reference/);
       assert.doesNotMatch(JSON.stringify(events), /test-account/);
-      assert.ok(results.every(result => result.details?.truncated === false));
+      assert.ok(results.every(result => JSON.stringify(result.details).includes('"truncated":false')));
       events.length = 0;
       if (!fake) prepareFakeResponse(provider, "/fake-inspect");
       await engine.submit({ id: "restored", prompt: "/fake-inspect", history });

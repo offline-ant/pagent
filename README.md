@@ -5,7 +5,7 @@ an ordinary directory. The page owns its editors, conversation records, tool
 display, working memory, and interaction policy. Agents can edit those files and
 the live DOM.
 
-Pagent is a standalone Node **24+** CLI, not a Pi extension. It uses Pi **0.85.1**
+Pagent is a standalone Node **24+** CLI, not a Pi extension. It uses Pi **0.87.0**
 and the bundled `pi-browser` library for Firefox/WebDriver BiDi and Chromium/CDP.
 No sibling checkout or `pi-ant` package is required at runtime.
 

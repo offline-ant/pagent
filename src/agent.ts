@@ -31,9 +31,14 @@ const thinking = Type.Object({
   type: Type.Literal("thinking"), thinking: Type.String(),
   thinkingSignature: Type.Optional(Type.String()), redacted: Type.Optional(Type.Boolean()),
 });
+const jsonObject = Type.Cyclic({
+  value: Type.Union([Type.Null(), Type.Boolean(), Type.Number(), Type.String(), Type.Array(Type.Ref("value")), Type.Ref("object")]),
+  object: Type.Record(Type.String(), Type.Ref("value")),
+}, "object");
+const jsonValue = Type.Cyclic(jsonObject.$defs, "value");
 const toolCall = Type.Object({
   type: Type.Literal("toolCall"), id: Type.String({ minLength: 1 }), name: Type.String({ minLength: 1 }),
-  arguments: Type.Record(Type.String(), Type.Unknown()),
+  arguments: jsonObject,
   thoughtSignature: Type.Optional(Type.String()), namespace: Type.Optional(Type.String()),
 });
 const cost = Type.Object({
@@ -46,7 +51,8 @@ const usage = Type.Object({
   totalTokens: Type.Number({ minimum: 0 }), cost,
   cacheWrite1h: Type.Optional(Type.Number({ minimum: 0 })), reasoning: Type.Optional(Type.Number({ minimum: 0 })),
 });
-const messageSchema = Type.Union([
+/** Page-owned history: completed conversation only. System messages belong to the host and are rejected. */
+const pageMessageSchema = Type.Union([
   Type.Object({
     role: Type.Literal("user"), content: Type.Union([Type.String(), Type.Array(Type.Union([text, image]))]),
     timestamp: Type.Number({ minimum: 0 }),
@@ -62,8 +68,8 @@ const messageSchema = Type.Union([
   }),
   Type.Object({
     role: Type.Literal("toolResult"), toolCallId: Type.String({ minLength: 1 }), toolName: Type.String({ minLength: 1 }),
-    content: Type.Array(Type.Union([text, image])), details: Type.Optional(Type.Unknown()),
-    usage: Type.Optional(usage), addedToolNames: Type.Optional(Type.Array(Type.String())),
+    content: Type.Array(Type.Union([text, image])), details: Type.Optional(jsonValue),
+    usage: Type.Optional(usage),
     isError: Type.Boolean(), timestamp: Type.Number({ minimum: 0 }),
   }),
 ]);
@@ -77,7 +83,7 @@ export function validateHistory(input: unknown): Message[] {
   const pending = new Map<string, string>();
   for (let index = 0; index < input.length; index++) {
     const value: unknown = input[index];
-    if (!Check(messageSchema, value)) throw new Error(`Invalid completed message at history[${index}].`);
+    if (!Check(pageMessageSchema, value)) throw new Error(`Invalid completed message at history[${index}].`);
     if (pending.size && value.role !== "toolResult") throw new Error(`Missing tool results before history[${index}].`);
     if (value.role === "assistant") {
       for (const block of value.content) {
@@ -106,6 +112,8 @@ function emitSessionEvent(options: EngineOptions, event: AgentSessionEvent): voi
     case "message_start":
     case "message_update":
     case "message_end":
+      // System messages are host-owned prompt/tool state, never page conversation.
+      if (event.message.role === "system") break;
       options.emit({
         type: "message", phase: event.type === "message_start" ? "start" : event.type === "message_update" ? "update" : "end",
         message: structuredClone(event.message),
@@ -135,8 +143,8 @@ async function resources(options: EngineOptions, contextFailed: (error: Error) =
   extension.handlers.set("before_agent_start", [async () => ({ systemPrompt })]);
   extension.handlers.set("context", [async (event: unknown) => {
     try {
-      if (!Check(Type.Object({ type: Type.Literal("context"), messages: Type.Array(messageSchema) }), event)) {
-        throw new Error("Unexpected Pi context message shape.");
+      if (!Check(Type.Object({ type: Type.Literal("context"), messages: Type.Array(Type.Unknown()) }), event)) {
+        throw new Error("Unexpected Pi context event.");
       }
       const page = await options.readContext();
       if (typeof page.memory !== "string" || typeof page.outline !== "string") throw new Error("collectContext must supply string memory and outline fields.");

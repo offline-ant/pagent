@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fauxAssistantMessage, fauxToolCall, InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, InMemoryCredentialStore, InMemoryModelsStore, type JsonObject } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { SnapshotStore } from "pi-browser/web";
 import { createEngineFactory, validateHistory } from "../src/agent.ts";
@@ -45,7 +45,7 @@ test("model web_read is agent-scoped, network-free, and survives disposal and ho
     md: "captured line\n".repeat(4000), screenshot: png });
   const first = await store.read(saved.id);
   assert.ok(first.nextCursor);
-  async function read(id: string, args: Record<string, unknown>) {
+  async function read(id: string, args: JsonObject) {
     events.length = 0;
     provider.setResponses([
       fauxAssistantMessage(fauxToolCall("web_read", args), { stopReason: "toolUse" }),
