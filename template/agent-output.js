@@ -144,14 +144,46 @@ export class AgentOutput extends HTMLElement {
     const status = response.querySelector(".response-state");
     if (status.textContent !== this.state.status) status.textContent = this.state.status;
     const blocks = new Map([...list.children].map(node => [node.dataset.key, node]));
+    const publicBlocks = new Map([...this.children].filter(node => node.hasAttribute("data-pagent-public-paragraph")).map(node => [node.dataset.key, node]));
+    const publicKeys = new Set();
+    const publicHTML = this.closest("p-agent")?.hasAttribute("public-html");
     let cursor = list.firstChild;
     for (const paragraph of this.paragraphs) {
       const key = paragraphKey(paragraph);
-      let block = blocks.get(key);
+      const message = this.state.messages[paragraph.messageIndex];
+      // Only successfully completed final prose becomes ordinary page content.
+      // Streaming, tool-call commentary, failures and all non-text records stay in shadow DOM.
+      const isPublic = publicHTML && message?.role === "assistant" && message.stopReason === "stop" &&
+        !(Array.isArray(message.content) && message.content.some(part => part.type === "toolCall"));
+      let node = blocks.get(key);
+      let block = node?.localName === "slot" ? publicBlocks.get(key) : node;
       if (!block) {
         block = element("div", "paragraph");
         block.dataset.key = key;
         block.append(element("time", "paragraph-time"), element("div", "paragraph-text"));
+      }
+      if (isPublic) {
+        publicKeys.add(key);
+        const name = `public-paragraph-${key}`;
+        block.slot = name;
+        block.setAttribute("data-pagent-public-paragraph", "");
+        if (block.parentNode !== this) {
+          if (cursor === block) cursor = block.nextSibling;
+          this.append(block);
+        }
+        if (node?.localName !== "slot") {
+          node = element("slot");
+          node.name = name;
+          node.dataset.key = key;
+        }
+      } else {
+        block.removeAttribute("slot");
+        block.removeAttribute("data-pagent-public-paragraph");
+        if (node?.localName === "slot") {
+          if (cursor === node) cursor = node.nextSibling;
+          node.remove();
+        }
+        node = block;
       }
       const text = block.querySelector(".paragraph-text");
       if (text.textContent !== paragraph.text) text.textContent = paragraph.text;
@@ -163,13 +195,21 @@ export class AgentOutput extends HTMLElement {
         time.title = date.toLocaleString();
       }
       // Prepend new completions without detaching the text being read/selected.
-      if (block === cursor) cursor = cursor.nextSibling;
-      else list.insertBefore(block, cursor);
+      if (node === cursor) cursor = cursor.nextSibling;
+      else list.insertBefore(node, cursor);
     }
     while (cursor) {
       const next = cursor.nextSibling;
       cursor.remove();
       cursor = next;
+    }
+    for (const [key, block] of publicBlocks) if (!publicKeys.has(key) && block.parentNode === this) block.remove();
+    // Keep ordinary DOM traversal in the same newest-first order as the slotted display.
+    let publicCursor = this.querySelector(":scope > [data-pagent-public-paragraph]");
+    for (const key of publicKeys) {
+      const block = this.querySelector(`:scope > [data-pagent-public-paragraph][data-key="${key}"]`);
+      if (block === publicCursor) publicCursor = publicCursor.nextElementSibling;
+      else this.insertBefore(block, publicCursor);
     }
     const fragment = document.createDocumentFragment();
     const messages = [...this.state.messages, ...(this.state.partial ? [this.state.partial] : [])];

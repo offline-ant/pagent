@@ -236,7 +236,7 @@ test("reconnect drains events emitted during replay before advancing the connect
       await deliver(record);
     };
     try {
-      await app.browser.evaluateValue("aos.send({type:'ready',agents:pagent.agents.map(a=>a.id),after:0})");
+      await app.browser.evaluateValue("aos.send({type:'ready',agents:pagent.agents.map(a=>a.configuration),after:0})");
       await waitFor(app, "$(\"#main\").state.notice.includes('Unsupported native request')");
       await app.flush();
       assert.equal(injected, true);

@@ -167,7 +167,7 @@ for (const research of ["chromium", "firefox"] as const) {
         $(\"#main\").connected = false;
         $(\"#main\").webAttention = null;
         $(\"#main\").refresh();
-        aos.send({type:'ready',agents:pagent.agents.map(a=>a.id),after:$(\"#main\").lastSeq});
+        aos.send({type:'ready',agents:pagent.agents.map(a=>a.configuration),after:$(\"#main\").lastSeq});
       })()`);
       await waitFor(app, `$(\"#main\").connected && $(\"#main\").webAttention?.id === ${JSON.stringify(first.id)} && interventionEvents.includes('connected') && interventionEvents.includes('web-attention')`);
       assert.equal(requests.get("/first"), 1, "reconnection did not reload the research page");

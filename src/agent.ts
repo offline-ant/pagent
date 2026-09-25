@@ -5,6 +5,7 @@ import {
   defineTool,
   SessionManager,
   SettingsManager,
+  ModelRuntime,
   truncateHead,
   type AgentSession,
   type AgentSessionEvent,
@@ -12,16 +13,16 @@ import {
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import type { Message } from "@earendil-works/pi-ai";
-import { createWebTools, SnapshotStore } from "pi-browser/web";
+import { createWebTools, SnapshotStore, resolveWebSettings, type WebBackendState } from "pi-browser/web";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
-import { createFakeModel, prepareFakeResponse } from "./fake-model.ts";
+import { prepareFakeResponse } from "./fake-model.ts";
 import { buildSystemPrompt } from "./prompt.ts";
 import { resolveEngineModel, type EngineModel, type EngineModelOptions } from "./engine-model.ts";
 import { readWebBackendOverride, writeWebBackendOverride } from "./web-backend.ts";
 import type { AgentEngine, EngineOptions, Submission } from "./protocol.ts";
 
-const TOOL_NAMES = ["console", "save", "reload", "wait", "web_search", "web_fetch", "web_read"];
+import { TOOL_NAMES } from "./agent-config.ts";
 const MAX_HISTORY_BYTES = 8 * 1024 * 1024;
 const MAX_PROMPT_BYTES = 128 * 1024;
 const MAX_CONTEXT_BYTES = 128 * 1024;
@@ -117,6 +118,8 @@ function emitSessionEvent(options: EngineOptions, event: AgentSessionEvent): voi
       options.emit({
         type: "message", phase: event.type === "message_start" ? "start" : event.type === "message_update" ? "update" : "end",
         message: structuredClone(event.message),
+        ...(event.type === "message_update" && event.assistantMessageEvent.type === "thinking_end"
+          ? { thinkingEnd: event.assistantMessageEvent.contentIndex } : {}),
       });
       break;
     case "tool_execution_start":
@@ -133,7 +136,7 @@ function emitSessionEvent(options: EngineOptions, event: AgentSessionEvent): voi
 
 /** Only the host's context hook; no discovered resources or filesystem context reach the model. */
 async function resources(options: EngineOptions, contextFailed: (error: Error) => void): Promise<ResourceLoader> {
-  const systemPrompt = buildSystemPrompt(options.browserKind ?? "chromium");
+  const systemPrompt = options.systemPrompt ?? buildSystemPrompt(options.browserKind ?? "chromium", options);
   const extension: Extension = {
     path: "<pagent>", resolvedPath: "<pagent>",
     sourceInfo: createSyntheticSourceInfo("<pagent>", { source: "pagent" }),
@@ -143,6 +146,7 @@ async function resources(options: EngineOptions, contextFailed: (error: Error) =
   extension.handlers.set("before_agent_start", [async () => ({ systemPrompt })]);
   extension.handlers.set("context", [async (event: unknown) => {
     try {
+      if (options.blocked?.()) throw new Error("Execution has stopped.");
       if (!Check(Type.Object({ type: Type.Literal("context"), messages: Type.Array(Type.Unknown()) }), event)) {
         throw new Error("Unexpected Pi context event.");
       }
@@ -184,14 +188,24 @@ export interface EngineFactory {
   create(options: EngineOptions): Promise<AgentEngine>;
 }
 
-/** Resolve host model policy once; every page element gets its own independent agent loop. */
+/** One auth/runtime owner, with lazy per-model selection and independent inference loops. */
 export async function createEngineFactory(options: EngineModelOptions): Promise<EngineFactory> {
-  const shared = options.fake ? undefined : await resolveEngineModel(options);
-  const model = shared?.model ?? createFakeModel().getModel();
+  const runtime = options.fake ? undefined : await ModelRuntime.create({ allowModelNetwork: false });
+  const selections = new Map<string, Promise<EngineModel>>();
+  const labels = new Set<string>();
   return {
-    modelLabel: `${model.provider}/${model.id}`,
+    get modelLabel() { return labels.size === 1 ? [...labels][0] : labels.size ? "Multiple models" : options.model ?? "Per-agent models"; },
     async create(engineOptions) {
-      return createConfiguredEngine(engineOptions, shared ?? await resolveEngineModel(options));
+      const requested = { ...options, model: engineOptions.model ?? options.model };
+      // Faux response queues cannot be shared, even when the model ID is identical.
+      let selection = options.fake ? undefined : selections.get(requested.model ?? "");
+      if (!selection) {
+        selection = resolveEngineModel(requested, runtime);
+        if (!options.fake) selections.set(requested.model ?? "", selection);
+      }
+      const selected = await selection;
+      labels.add(`${selected.model.provider}/${selected.model.id}`);
+      return createConfiguredEngine(engineOptions, selected);
     },
   };
 }
@@ -209,8 +223,12 @@ async function createConfiguredEngine(options: EngineOptions, selected: EngineMo
   let closed = false;
   let cancelled = false;
 
+  const tools = options.tools ?? [...TOOL_NAMES];
   const backendOverride = options.webStateDirectory ? await readWebBackendOverride(options.webStateDirectory) : null;
-  const web = createWebTools({
+  const configured = resolveWebSettings().backend;
+  let backendState: WebBackendState = { configured, override: backendOverride, effective: backendOverride ?? configured,
+    source: backendOverride !== null ? "override" : process.env.PI_WEB_BACKEND !== undefined ? "environment" : "default" };
+  const web = tools.some(name => name.startsWith("web_")) ? createWebTools({
     profileDir: options.webProfileDir,
     snapshots: new SnapshotStore({ directory: options.webSnapshotDirectory }),
     settings: {
@@ -219,8 +237,8 @@ async function createConfiguredEngine(options: EngineOptions, selected: EngineMo
     },
     onAttention: options.onWebAttention,
     onProgress: message => options.emit({ type: "web-progress", message }),
-  });
-  web.setBackendOverride(backendOverride);
+  }) : undefined;
+  web?.setBackendOverride(backendOverride);
   let backendUpdates: Promise<void> = Promise.resolve();
   const customTools = [
     defineTool({
@@ -232,6 +250,7 @@ async function createConfiguredEngine(options: EngineOptions, selected: EngineMo
       parameters: Type.Object({ code: Type.String({ minLength: 1, maxLength: 128 * 1024 }) }),
       async execute(_id, params, signal) {
         signal?.throwIfAborted();
+        if (options.blocked?.()) throw new Error("Execution has stopped.");
         const result = await options.browser.evaluate(params.code, { signal, timeoutMs: 30_000 });
         const output = bounded(JSON.stringify(result, null, 2));
         if (result.error) throw new Error(output);
@@ -240,10 +259,11 @@ async function createConfiguredEngine(options: EngineOptions, selected: EngineMo
     }),
     defineTool({
       name: "save", label: "Save document",
-      description: "Checkpoint current HTML and serializable shadow DOM to the root resource. Saved script elements initialize a fresh runtime on reload. External resource files are stored separately through PUT or Source downloads.",
+      description: options.checkpoint === "private" ? "Checkpoint current HTML and serializable shadow DOM in private host storage, without changing the original document." : "Checkpoint current HTML and serializable shadow DOM to index.html. Saved scripts initialize a fresh runtime on reload; external resource files are stored separately.",
       parameters: Type.Object({}),
       async execute(_id, _params, signal) {
         signal?.throwIfAborted();
+        if (options.blocked?.()) throw new Error("Execution has stopped.");
         const revision = await options.save();
         return { content: [{ type: "text", text: `Document saved: ${revision}` }], details: { revision } };
       },
@@ -254,6 +274,7 @@ async function createConfiguredEngine(options: EngineOptions, selected: EngineMo
       parameters: Type.Object({}),
       async execute(_id, _params, signal) {
         signal?.throwIfAborted();
+        if (options.blocked?.()) throw new Error("Execution has stopped.");
         await options.browser.reload();
         return { content: [{ type: "text", text: "Stored root document reloaded. JavaScript scratch state was reset." }], details: {} };
       },
@@ -264,14 +285,15 @@ async function createConfiguredEngine(options: EngineOptions, selected: EngineMo
       parameters: Type.Object({ runs: Type.Array(Type.String({ minLength: 1, maxLength: 200 }), { minItems: 1, maxItems: 8, uniqueItems: true }) }),
       async execute(_id, params, signal) {
         signal?.throwIfAborted();
+        if (options.blocked?.()) throw new Error("Execution has stopped.");
         if (!options.waitForRuns) throw new Error("This host does not provide agent joining.");
         const results = await options.waitForRuns(params.runs, signal);
         signal?.throwIfAborted();
         return { content: [{ type: "text", text: bounded(JSON.stringify(results, null, 2)) }], details: {} };
       },
     }),
-    ...web.tools,
-  ];
+    ...(web?.tools ?? []),
+  ].filter(tool => tools.some(name => name === tool.name));
 
   async function run(input: Submission, history: Message[]): Promise<void> {
     let contextError: Error | undefined;
@@ -282,7 +304,7 @@ async function createConfiguredEngine(options: EngineOptions, selected: EngineMo
       sessionManager: manager,
       settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false }, enableInstallTelemetry: false }),
       resourceLoader: await resources(options, error => { contextError = error; activeSession?.agent.abort(); }),
-      noTools: "builtin", tools: TOOL_NAMES, customTools,
+      noTools: "builtin", tools, customTools,
     });
     const session = created.session;
     activeSession = session;
@@ -290,7 +312,7 @@ async function createConfiguredEngine(options: EngineOptions, selected: EngineMo
     const unsubscribe = session.subscribe(event => emitSessionEvent(options, event));
     try {
       await session.bindExtensions({ mode: "print" });
-      if (closed || cancelled) return;
+      if (closed || cancelled || options.blocked?.()) { cancelled = true; return; }
       if (fake) prepareFakeResponse(fake, input.prompt);
       await session.prompt(input.prompt, { expandPromptTemplates: false });
       if (contextError) throw contextError;
@@ -307,19 +329,22 @@ async function createConfiguredEngine(options: EngineOptions, selected: EngineMo
   return {
     get modelLabel() { return modelLabel; },
     get busy() { return running !== undefined; },
-    getBackendState: () => web.getBackendState(),
+    getBackendState: () => web?.getBackendState() ?? { ...backendState },
     setBackendOverride(override) {
       if (closed) return Promise.reject(new Error("Agent engine is closed."));
       const update = backendUpdates.then(async () => {
         if (options.webStateDirectory) await writeWebBackendOverride(options.webStateDirectory, override);
-        web.setBackendOverride(override);
-        options.emit({ type: "backend-state", state: web.getBackendState() });
+        web?.setBackendOverride(override);
+        backendState = { ...backendState, override, effective: override ?? configured,
+          source: override !== null ? "override" : process.env.PI_WEB_BACKEND !== undefined ? "environment" : "default" };
+        options.emit({ type: "backend-state", state: web?.getBackendState() ?? { ...backendState } });
       });
       backendUpdates = update.catch(() => {});
       return update;
     },
     submit(input) {
       if (closed) return Promise.reject(new Error("Agent engine is closed."));
+      if (options.blocked?.()) return Promise.reject(new Error("Execution has stopped."));
       if (running) return Promise.reject(new Error("Agent is busy. Cancel or wait before submitting."));
       if (typeof input.id !== "string" || !input.id || typeof input.prompt !== "string" || !input.prompt.trim()) return Promise.reject(new Error("Submission needs a nonempty ID and prompt."));
       if (Buffer.byteLength(input.prompt) > MAX_PROMPT_BYTES) return Promise.reject(new Error("Prompt exceeds 128 KiB."));
@@ -345,7 +370,7 @@ async function createConfiguredEngine(options: EngineOptions, selected: EngineMo
         await backendUpdates;
         await activeSession?.abort();
         await running?.catch(() => {});
-      } finally { await web.close(); }
+      } finally { await web?.close(); }
     },
   };
 }

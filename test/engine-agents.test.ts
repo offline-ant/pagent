@@ -100,6 +100,25 @@ test("real factory resolves model/runtime once and closing one engine leaves sib
   } finally { await b.close(); }
 });
 
+test("explicit per-agent models do not require the unused workspace default and share one runtime", async t => {
+  const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null,
+    modelsStore: new InMemoryModelsStore(), allowModelNetwork: false, refreshOnCreate: false });
+  t.mock.method(runtime, "hasConfiguredAuth", () => true);
+  const creation = t.mock.method(ModelRuntime, "create", async () => runtime);
+  const factory = await createEngineFactory({ model: "unused/not-a-model" });
+  const first = harness("first");
+  const second = harness("second");
+  first.options.model = "openai/gpt-5";
+  second.options.model = "anthropic/claude-sonnet-4-5";
+  const [a, b] = await Promise.all([factory.create(first.options), factory.create(second.options)]);
+  try {
+    assert.equal(a.modelLabel, "openai/gpt-5");
+    assert.equal(b.modelLabel, "anthropic/claude-sonnet-4-5");
+    assert.equal(factory.modelLabel, "Multiple models");
+    assert.equal(creation.mock.callCount(), 1);
+  } finally { await Promise.all([a.close(), b.close()]); }
+});
+
 test("wait joins host run IDs without evaluating browser code", async () => {
   const { options, events } = harness("parent");
   options.browser.evaluate = async () => { throw new Error("wait occupied the browser queue"); };
@@ -197,5 +216,20 @@ test("identity and fresh diagnostics accompany every model request without separ
     assert.match(answer(events), /error after tool/);
     assert.doesNotMatch(answer(events), /idle timer warning/);
     assert.equal(diagnosticReads, contextReads);
+  } finally { await engine.close(); }
+});
+
+test("exact configured system prompt replaces default guidance and only selected tools reach the model", async () => {
+  const { options, events } = harness("configured");
+  options.systemPrompt = "An exact operator prompt.\nNo appended instructions.";
+  options.tools = ["console"];
+  const engine = await createEngine(options);
+  try {
+    await engine.submit({ id: "inspect", prompt: "/fake-inspect", history: [] });
+    const inspected = JSON.parse(answer(events)) as { systemPrompt: string; tools: { name: string }[] };
+    assert.equal(inspected.systemPrompt, options.systemPrompt);
+    assert.deepEqual(inspected.tools.map(tool => tool.name), ["console"]);
+    options.blocked = () => true;
+    await assert.rejects(engine.submit({ id: "stopped", prompt: "/fake-inspect", history: [] }), /stopped/);
   } finally { await engine.close(); }
 });

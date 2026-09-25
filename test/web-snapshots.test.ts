@@ -55,6 +55,7 @@ test("model web_read is agent-scoped, network-free, and survives disposal and ho
         return fauxAssistantMessage("Read complete");
       },
     ]);
+    pool.register(id);
     await pool.submit(id, "input", crypto.randomUUID());
     const history = validateHistory(events.flatMap(event => event.type === "message" && event.phase === "end" ? [event.message] : []));
     const result = history.find(message => message.role === "toolResult");

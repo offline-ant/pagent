@@ -26,6 +26,19 @@ test("saved Pi model and per-model thinking apply without loading resources or w
   assert.equal(load.mock.callCount(), 1);
 });
 
+test("per-agent selection reuses a supplied runtime instead of creating another auth owner", async t => {
+  const runtime = await isolatedRuntime();
+  t.mock.method(SettingsManager, "create", () => SettingsManager.inMemory());
+  t.mock.method(runtime, "hasConfiguredAuth", () => true);
+  const creation = t.mock.method(ModelRuntime, "create", async () => { throw new Error("unexpected second runtime"); });
+  const first = await resolveEngineModel({ model: "openai/gpt-5" }, runtime);
+  const second = await resolveEngineModel({ model: "anthropic/claude-sonnet-4-5" }, runtime);
+  assert.equal(first.modelRuntime, second.modelRuntime);
+  assert.equal(first.model.provider, "openai");
+  assert.equal(second.model.provider, "anthropic");
+  assert.equal(creation.mock.callCount(), 0);
+});
+
 test("CLI model and thinking override saved defaults; model suffix overrides saved thinking", async t => {
   const runtime = await isolatedRuntime();
   t.mock.method(ModelRuntime, "create", async () => runtime);

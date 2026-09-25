@@ -7,9 +7,11 @@ const terminal = run => run && ["complete", "cancelled", "error"].includes(run.s
 
 /** One ordinary page element owns one conversation and independent inference. */
 export class PAgent extends HTMLElement {
-  static observedAttributes = ["id"];
+  static observedAttributes = ["id", "model", "system-prompt", "tools", "mode", "repeat-prompt", "repeat-delay", "persist-start", "persist-end", "public-html"];
 
   connectedCallback() {
+    // An authoritative ancestor may already have rejected this parsed subtree.
+    if (!this.isConnected) return;
     const root = installRoot(this, `
       <header class="agent-heading">
         <span class="agent-badge"></span><span class="status" data-status="disconnected">Connecting</span>
@@ -48,13 +50,25 @@ export class PAgent extends HTMLElement {
   }
 
   attributeChangedCallback(name, previous, value) {
-    if (name !== "id" || !this.identity || value === this.identity) return;
-    this.setAttribute("id", this.identity);
-    this.notice("An attached agent cannot be renamed; create a new p-agent instead.", true);
+    if (!connection.registered(this) || previous === value || this.restoringAttribute) return;
+    this.restoringAttribute = true;
+    if (previous === null) this.removeAttribute(name); else this.setAttribute(name, previous);
+    this.restoringAttribute = false;
+    this.notice(name === "id" ? "An attached agent cannot be renamed; create a new p-agent instead." : "Agent configuration is pinned while registered; dispose it and wait for acknowledgment before changing settings.", true);
+  }
+
+  get configuration() {
+    const configuration = { agentId: this.id };
+    for (const [attribute, key] of [["model", "model"], ["system-prompt", "systemPrompt"], ["mode", "mode"], ["repeat-prompt", "repeatPrompt"]]) {
+      if (this.hasAttribute(attribute)) configuration[key] = this.getAttribute(attribute);
+    }
+    if (this.hasAttribute("tools")) configuration.tools = this.getAttribute("tools").split(",").map(name => name.trim()).filter(Boolean);
+    if (this.hasAttribute("repeat-delay")) configuration.repeatDelayMs = Number(this.getAttribute("repeat-delay"));
+    return configuration;
   }
 
   get canSubmit() {
-    if (!this.connected || this.state.busy || connection.reloading) return false;
+    if (!this.connected || this.state.busy || connection.reloading || connection.executionState === "stopped") return false;
     try { connection.validate(this); return true; } catch { return false; }
   }
   get status() {
@@ -110,10 +124,13 @@ export class PAgent extends HTMLElement {
     connection.validate(this);
     if (!this.connected) throw new Error("The native connection is not ready.");
     if (connection.reloading) throw new Error("Wait for workspace reload to finish before submitting.");
+    if (connection.executionState === "stopped") throw new Error("Execution has stopped; restart the host for another run.");
     if (this.state.busy) throw new Error("Agent is busy. Wait for this response or cancel it before submitting.");
   }
 
-  prompt(text) {
+  // scheduleId is supplied only by the host's repeat controller. It grants no
+  // authority: the host consumes it once and rejects stale queued submissions.
+  prompt(text, scheduleId) {
     this.assertSubmittable();
     if (typeof text !== "string" || !text.trim()) throw new Error("Prompt must be a nonempty string.");
     // Programmatic turns precede trailing human drafts, so their later submission
@@ -125,10 +142,10 @@ export class PAgent extends HTMLElement {
     }
     const input = this.addInput(before);
     input.value = text;
-    return this.submit(input.id);
+    return this.submit(input.id, scheduleId);
   }
 
-  submit(id) {
+  submit(id, scheduleId) {
     this.assertSubmittable();
     const input = this.inputs.find(node => node.id === id);
     if (!input) throw new Error(`No user-input with id ${id} in agent ${this.id}`);
@@ -153,13 +170,15 @@ export class PAgent extends HTMLElement {
     this.pendingRunId = runId;
     output.apply({ type: "status", status: "running" });
     this.refresh();
-    try { connection.send({ type: "submit", agentId: this.identity, id, runId }); }
+    try { connection.send({ type: "submit", agentId: this.identity, id, runId, ...(scheduleId === undefined ? {} : { scheduleId }) }); }
     catch (error) {
       this.finish({ ...this.state.run, status: "error", error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
     return runId;
   }
+
+  dispose() { connection.dispose(this); }
 
   cancel() {
     if (!this.connected || !this.state.busy) return false;
@@ -221,6 +240,7 @@ export class PAgent extends HTMLElement {
       this.webAttention = null;
       this.webResponding = false;
       this.state.model = event.model;
+      this.allowedTools = event.tools;
       if (event.run && (!this.pendingRunId || event.run.id === this.pendingRunId)) {
         this.pendingRunId = undefined;
         if (terminal(event.run)) {

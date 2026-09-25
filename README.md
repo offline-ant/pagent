@@ -84,6 +84,7 @@ project/                       The directory passed to pagent; public resource r
   p-agent.js                   Agent element and run lifecycle
   user-input.js                Editable input and submission
   agent-connection.js          Native connection, routing, and replay cursor
+  agent-persistence.js         Opt-in same-element recovery after DOM removal
   agent-controls.js            Agent and page controls
   agent-output.js              Output rendering and paragraph timestamps
   dom.js                       Shared DOM helpers
@@ -98,6 +99,7 @@ project/                       The directory passed to pagent; public resource r
     research/<sha256-id>/       Per-agent research profiles
     web-snapshots/<sha256-id>/  Per-agent immutable web evidence
     revisions/                 HTML checkpoints
+    recordings/<id>/           Optional private DOM/PNG timeline and inert viewer
     recovery/                  Explicit recovery backups
 ```
 
@@ -108,16 +110,169 @@ copied only when seeding a missing entry document or explicitly resetting the UI
 
 Programmatic hosts call `startPagent({ directory?: string, ... })`. The returned
 app exposes `directory`, `stateDirectory`, `url`, `browser`, `agents` (a read-only
-map of engines), `modelLabel`, `busy`, `getBackendState()`, `save()`, `flush()`,
-and `close()`. `close()` checkpoints and shuts down the host.
+map of engines), `modelLabel`, `busy`, `executionState`, `start()`, `stop()`,
+`getBackendState()`, `save()`, `flush()`, and `close()`. `close()` checkpoints
+according to the configured policy and shuts down the host.
+
+## Declarative agents and host configuration
+
+Agent settings are ordinary HTML attributes:
+
+```html
+<p-agent id="one"
+  model="provider/model"
+  system-prompt="./prompt.md"
+  tools="console,wait"
+  mode="continuous"
+  repeat-prompt="do something"
+  repeat-delay="1000"
+></p-agent>
+```
+
+- `model` overrides the workspace default for that identity. Omit it to inherit.
+  Pagent does not load ordinary Pi provider extensions; an extension-only model
+  being available in Pi does not make it available here.
+- `system-prompt` names a UTF-8 file relative to the resource root. It **replaces**
+  the normal system prompt, rather than appending. Absolute paths, external URLs,
+  traversal, hidden paths, and symlinks are rejected. Files are read by the host,
+  not fetched by page scripts. Omit it for capability-aware stock instructions.
+- `tools` is a comma-separated subset of the host's allowed tools. An empty value
+  selects none. Unknown names and requests exceeding the host ceiling are errors.
+- `mode="continuous"` repeats successful turns using `repeat-prompt`. Omit mode
+  for manual execution. `repeat-delay` is optional nonnegative milliseconds,
+  overriding the host's `repeatDelayMs` (default 1000).
+
+Configuration is pinned while the identity is registered, including temporary
+detachment and pending disposal. Changing these attributes is not a live model
+or permission switch; dispose and await acknowledgment before reconfiguring. Explicit closing tags are required;
+HTML custom elements are not self-closing.
+
+HTTP and network policy are **page-wide**, because every agent shares the same
+JavaScript environment. There is intentionally no per-agent `http` attribute
+claiming isolation that cannot be enforced.
+
+Load host settings only through an explicit JSON path:
+
+```sh
+pagent ./piece --config ./piece/.pagent-config.json
+pagent ./piece --http GET --network local --tools console,wait \
+  --checkpoint private --duration 600 --repeat-delay 1000 \
+  --record 30000 --viewport 1440x1000 --browser chromium
+```
+
+```json
+{
+  "browser": "chromium",
+  "network": "local",
+  "http": ["GET"],
+  "tools": ["console", "wait"],
+  "checkpoint": "private",
+  "durationMs": 600000,
+  "repeatDelayMs": 1000,
+  "record": { "intervalMs": 30000, "screenshots": true, "events": ["tool", "thinking", "message"] },
+  "viewport": { "width": 1440, "height": 1000 }
+}
+```
+
+The same keys are `startPagent` options. JSON also accepts `model`, `thinking`,
+and `headless`. Unknown keys and malformed values are rejected before workspace
+startup; no config file is discovered automatically. CLI flags override JSON.
+`--duration` uses seconds; JSON duration and repetition/recording intervals use
+milliseconds. `--record` enables DOM and PNG recording; JSON can set
+`screenshots:false` and opt into completion triggers through `events` (see below).
+Viewport dimensions are CSS pixels from 1 through 8192.
+
+Defaults preserve the ordinary writable workspace: all tools, all resource
+methods, open networking, document checkpoints, and no duration or recording.
+`network:"local"` also removes web research tools. Host tool selection is a
+ceiling; an element cannot grant itself excluded tools. Agents sharing a page
+can still invoke one another, so per-agent tool selection is not an isolation
+boundary.
+
+`checkpoint:"document"` writes the live HTML to `index.html` as usual.
+`"private"` writes only `.pagent/revisions/`, leaving the original document
+unchanged. `"none"` disables HTML checkpoints. Private recordings are independent
+of checkpoint policy. With private/none policies, restart and reload use the
+original document, not the last live DOM. Their delivery outbox is in memory only:
+these modes neither read nor change a previous document-mode outbox, and discard
+old runtime events on reload. Document mode retains its durable crash-recovery outbox.
+
+### Starting and repeating
+
+`pagent.start()` in the page (or `app.start()` in the host) explicitly starts the
+execution. It captures the participating agents with `repeat-prompt`, starts the
+optional duration clock and recorder, and prompts them concurrently. Calling it
+again nudges idle participants; busy agents do not accumulate prompts.
+`pagent.nudge()` nudges an already-running execution without starting one. Ordinary
+manual submissions remain available without a configured finite duration; a
+finite execution is armed until explicitly started.
+
+Continuous agents repeat only after a successful terminal run and the configured
+delay. Errors and cancellations pause repetition; a later nudge can retrigger the
+agent. The host owns scheduling and never trusts page timers or editable status
+fields. Removed participants are retired, and newly attached agents are not
+silently enrolled in an already-running execution. Context exhaustion is an
+explicit error, not an automatic history reset.
+
+`pagent.stop()` / `app.stop()` stops admission and repetition. The deadline and
+host closure use the same terminal path: stop periodic recording, attempt a
+bounded final capture of the live page, then cancel work without browser recovery.
+A six-second cleanup budget starts immediately, even without a configured duration;
+if cancellation stalls, Pagent closes the owned browser and ends cleanup rather
+than waiting indefinitely. Closing the browser ends page animations too. The page can alter its
+own controls but not extend the host deadline. Starting after a stopped execution
+requires a new host; reloads do not automatically resume repetition.
+
+### Private recording and playback
+
+Recording begins at explicit kickoff, with a baseline before prompting. The host
+samples the effective HTML (including serializable shadow DOM) and optional PNGs
+without page timers, save events, or agent messages. Evidence is written under
+`.pagent/recordings/<unique-id>/`, never through the resource HTTP server.
+
+Each archive contains `manifest.jsonl`, `frames/`, and an inert `viewer.html`.
+Open the viewer in an ordinary browser and select the recording folder to scrub
+or play its screenshots. It does not execute archived HTML. The manifest records
+planned and actual capture times, missed samples, errors, and the final capture.
+
+Optional `record.events` selects additional captures after acknowledged page delivery:
+- `"tool"`: tool execution ended, including error results.
+- `"thinking"`: the SDK emitted the end of a reasoning block exposed by the provider.
+- `"message"`: an assistant message ended (including tool-call messages and interrupted
+  messages), not a user/tool-result message or streaming token.
+
+Omit `events` or use `[]` for periodic-only recording. For example,
+`{"intervalMs":30000,"screenshots":true,"events":["tool","thinking","message"]}`
+combines 30-second samples with completion captures. Triggers are host-owned, never
+page-requested, and do not invoke save/checkpoint or delay model work. Failed delivery
+and reconnect replay do not trigger captures. Stop, reload, runtime invalidation,
+and teardown disable completion sampling and cancel pending triggers.
+
+Concurrent completions share one pending batch. Capture is scheduled one second
+after the first completion, or one second after an in-flight capture settles; later
+completions do not push that deadline back. A periodic frame can absorb the batch.
+There is no per-event capture queue or immediate capture-after-capture loop. Each
+frame/error records up to 32 completion attributions (kind, sequence, agent/run/input,
+call or reasoning-block index, and delivery time), plus an omitted-event count.
+Identifiers are capped at 200 characters; message/tool payloads are not copied into
+attribution. A trigger cancelled by stop/reload is reported as a skip. Captures are
+best-effort later observations, not an exact visual frame for every completion.
+
+Intervals are a target cadence: only one capture is in flight; delayed/busy
+samples are skipped, not queued. Capture and shutdown waits are bounded, so a
+hung renderer may leave gaps or no final frame. DOM and screenshots are separate
+observations, not atomic frames. HTML is not a heap snapshot: JavaScript closures,
+listeners, property-only state, CSSOM edits, canvas/WebGL pixels, and animation
+phase cannot all be reconstructed from it. Recording overhead is not guaranteed
+undetectable, and archives can consume substantial disk space.
 
 ## Agents and runs
 
 The starter's `<p-agent id="main">` is an ordinary agent, not a privileged parent.
 Full `<p-agent>` elements can appear anywhere in light DOM, including ordinary
-containers and nested agents. Agents share model settings, DOM/runtime, and
-resource files, but have independent inference and scoped history. Inputs,
-outputs, and `<agent-memory>` belong to their nearest light-DOM agent; unowned
+containers and nested agents. Agents share DOM/runtime and resource files, with
+a common model default but optional per-element models, independent inference,
+and scoped history. Inputs, outputs, and `<agent-memory>` belong to their nearest light-DOM agent; unowned
 memory is shared. Inserting or restoring an element never starts inference.
 
 The preload installs `$ = document.querySelector.bind(document)` on each
@@ -141,17 +296,56 @@ navigation. It does not pierce shadow DOM.
 | `.messages` | Copy of completed conversation records. |
 | `.run` | Latest receipt: `id`, `agentId`, `inputId`, `status`, `result`, optional `error`. |
 | `.cancel()` | Request cancellation of the current run. |
-| `.remove()` | Detach and dispose the agent, cancelling its run. |
+| `.remove()` | Ordinary DOM removal: recover if persistence is enabled, otherwise dispose. |
+| `.dispose()` | Permanently remove this agent, bypassing persistence and cancelling its run. |
 
 IDs are unique, nonempty, at most 200 characters, without whitespace or controls.
-Attached agents cannot be renamed. Removed IDs remain reserved until the host's
-`disposed` acknowledgment; ordinary same-task DOM moves retain identity.
+Registered agents cannot be renamed. Disposed IDs remain reserved until the
+host's `disposed` acknowledgment; ordinary same-task or next-microtask DOM moves
+retain identity. Explicitly reinserting an element after acknowledgment registers
+it again; neither recovery nor registration automatically prompts it.
+
+### Persistent elements
+
+```html
+<p-agent id="one" persist-end="body"></p-agent>
+<!-- Alternatively: persist-start="#some-container" -->
+```
+
+Opt in with exactly one of `persist-start` or `persist-end`, whose value must be a
+nonempty valid CSS selector. Without either, removal disposes normally. Settings
+are validated before registration and pinned even while temporarily detached.
+
+After a subtree or whole-body replacement, a shared microtask batch reattaches
+**the same registered element**, before any disposal request. Its conversation,
+shadow DOM, drafts, listeners, identity, and active run survive; there is no
+cloning, new prompt, or second transcript store. Ordinary DOM moves are no-ops.
+Recovery uses registration order (including stable prepend order), restoring
+persistent ancestors before descendants to preserve nesting. Explicit `.dispose()`
+removes only that identity permanently; independently persistent children can
+recover outside it. `.cancel()` affects only the current run.
+
+Targets are resolved afresh on every recovery. A missing match warns in the
+browser console and falls back to the current `document.body`. Targets must be
+connected HTML containers, not void elements or the agent's own subtree. Invalid
+targets, no valid body, or unrelated ID collisions report an error and dispose
+normally, without retries or deleting artwork. Fresh unregistered same-ID
+`p-agent` replacements are rejected/removed in favor of the original, including
+when `body.innerHTML = body.innerHTML` reparses the page.
+
+Page stop requests suppress recovery immediately; host stop/deadline and reload
+state events, and page teardown, also suppress it. Recovery never restarts stopped
+execution or changes host deadlines. This handles accidental subtree removal,
+not hostile scripts, cleared agent internals, rewritten bridges/prototypes,
+navigation, or repeated removal loops. It preserves existence, not visibility or
+non-agent controls. Existing project-owned UI modules need explicit updating;
+installing a new CLI does not replace them.
 
 The host `wait({runs: [runId]})` tool joins 1–8 unique runs **outside** the shared
 console queue. Awaiting or polling completion inside console can deadlock the
 agents that need that queue. Self-waits and wait cycles are rejected. Cancelling
 a wait stops only the waiter, not independent joined agents; cancel or remove
-those agents explicitly.
+those agents explicitly (use `.dispose()` for persistent elements).
 
 Limits: 32 attached agents, 8 active runs including waiting, and receipts for the
 latest 128 completions during the host's lifetime. Older or restarted-host results
@@ -166,21 +360,24 @@ evaluations share an ordered queue.
 | Tool | Behavior |
 | --- | --- |
 | `console({code})` | Evaluate browser JavaScript; await returned Promises. Return value, logs, and errors. |
-| `save({})` | Checkpoint live HTML, including serializable shadow DOM, to `index.html`. |
+| `save({})` | Checkpoint live HTML and serializable shadow DOM according to host policy. |
 | `reload({})` | Load stored HTML and scripts again; all agents lose unsaved DOM/runtime state. |
 | `wait({runs})` | Join agent runs outside the console queue. |
 | `web_search({query, max_results?})` | Linked results and a snapshot ID; default 10, maximum 20. |
 | `web_fetch({url})` | Readable Markdown and a snapshot ID. Cite the fetched URL. |
 | `web_read({snapshot, format?, cursor?})` | Read saved evidence without network access. |
 
+The table lists the default tools; host and element settings can restrict them.
 There is no host shell, general filesystem tool, or Pi `browser` tool. Chromium
 console supports bare top-level `await` and REPL lexical redeclaration. Firefox
 requires Promise expressions/async IIFEs, not bare top-level await or lexical
 redeclaration. Console results are bounded to 50 KiB / 2000 lines; evaluations
 time out after 30 seconds.
 
-Cancelling a running Firefox evaluation restarts the workspace browser and
-restores saved HTML. **Every agent loses unsaved DOM/runtime state.** Cancelling
+Ordinary per-agent cancellation of a running Firefox evaluation restarts the
+workspace browser and restores saved HTML. **Every agent loses unsaved DOM/runtime
+state.** Terminal stop, deadline, and host shutdown disable this recovery before
+final capture; they never restart an original document as a final recorded frame. Cancelling
 inference when no evaluation is running does not restart it. A hung internal
 context collector or event receiver stops Firefox without automatic relaunch;
 repair the files and recover explicitly. Research-browser failures do not reset
@@ -191,8 +388,9 @@ model reload reconnects existing loops but gates new submissions until connected
 Agents missing from restored HTML are disposed. Neither operation isolates one
 agent's DOM from another's.
 
-The host checkpoints accepted submissions before inference, completed/cancelled
-turns, and clean shutdown. Save is available between turns. Checkpoints contain
+Unless checkpointing is disabled, the host checkpoints accepted submissions
+before inference, completed/cancelled turns, and clean shutdown. Save is available
+between turns when enabled. Checkpoints contain
 user/model/tool records, reasoning actually exposed by the provider, drafts,
 component state, and native raster tool images in open serializable shadow DOM.
 `getHTML({serializableShadowRoots:true})` captures it; `outerHTML` does not.
@@ -205,12 +403,17 @@ without duplicating saved state. Browser storage is not an HTML checkpoint and a
 random port means the origin can change between launches. HTML revisions do not
 back up external resource files.
 
-The private outbox retains completed events until checkpointed, replaying unseen
-records after reconnect. Streaming updates are coalesced in memory; a hard crash
+In document-checkpoint mode, the private outbox retains completed events until
+checkpointed, replaying unseen records after reconnect. Streaming updates are coalesced in memory; a hard crash
 can lose the latest partial output. There is no separate hidden conversation
 history overriding the page's selected records.
 
 ### Resource HTTP
+
+The page-wide `http` option restricts methods; `GET` also permits `HEAD` and
+includes directory listings. For example, `http:["GET"]` exposes read-only local
+resources and listings. The following table describes the unrestricted default.
+`network:"local"` additionally rejects `Source` downloads.
 
 | Request | Behavior |
 | --- | --- |
@@ -336,6 +539,39 @@ except fenced code remains one block. Reasoning and tools remain available below
 Page APIs include `pagent.agents`, agent `.inputs`/`.outputs`, and output
 `.tools`/`.paragraphs`. Shadow roots are accessible explicitly.
 
+### Public final responses
+
+```html
+<p-agent id="one" public-html></p-agent>
+```
+
+The boolean `public-html` attribute opts that agent's completed final assistant
+text into **ordinary light DOM** under its `agent-output` elements. For example,
+`$('#one').querySelector('agent-output').textContent` and `$('#one').outerHTML`
+include that prose without traversing shadow roots. Named slots display these
+same paragraph nodes in their usual newest-first positions, with the original
+timestamps; they are not a second visible transcript. Text remains inert plain
+text, including code and markup written in the answer.
+
+Only completed assistant messages with `stopReason:"stop"` and no tool calls
+qualify. Streaming text, tool-call commentary, interrupted/truncated answers,
+reasoning, tool arguments/results, and provider metadata remain in existing
+shadow state/rendering. Full chronological conversation records remain canonical
+there; save/reload and persistent-element recovery retain the same history and
+run identity. This is presentation/discoverability, **not access control**: open
+shadow roots and the existing `.messages` API remain accessible to page scripts.
+
+Without the attribute, output stays in shadow DOM as before. The setting is
+pinned while registered, applies only to the nearest owning agent (not nested
+agents), and does not change host configuration or start inference. Existing
+project-owned UI modules need explicit updating or fresh setup.
+
+The stock outline follows ordinary light DOM: it retains public output just as
+it retains other page text, subject to its existing 16,000-character bound. It
+still does not traverse shadow transcripts. There is no separate peer feed,
+summary, notification, or instruction to communicate. Editable
+`pagent.collectContext` remains the page's context policy.
+
 The CLI forwards browser console entries and uncaught errors to stdout, including
 source locations/stacks when available. Completed agent text/reasoning/tool
 activity is mirrored through the browser console; image mirrors print markers,
@@ -367,11 +603,13 @@ aos.addEventListener('event', event => {
   }
   event.ack();
 });
-aos.send({type: 'ready', after: lastStoredSequence, agents: ['main']});
-aos.send({type: 'register', agentId: 'research'});
+aos.send({type: 'ready', after: lastStoredSequence, agents: [{agentId: 'main'}]});
+aos.send({type: 'register', agentId: 'research', model: 'provider/model', tools: ['console', 'wait']});
 aos.send({type: 'submit', agentId: 'main', id: 'input-0', runId: crypto.randomUUID()});
 aos.send({type: 'cancel', agentId: 'main'});
 aos.send({type: 'dispose', agentId: 'research'});
+aos.send({type: 'start'}); // Later start/nudge requests nudge idle participants.
+aos.send({type: 'stop'});
 aos.send({type: 'save'});
 aos.send({type: 'reload'});
 aos.send({type: 'web-continue', agentId: 'main', id: attention.id});
@@ -379,13 +617,22 @@ aos.send({type: 'web-cancel', agentId: 'main', id: attention.id});
 aos.send({type: 'backend-set', override: 'browser'}); // auto | codex | browser | null
 ```
 
+Ready/register agent descriptors carry `agentId` and optional `model`,
+`systemPrompt` (local resource path), `tools` (array), `mode`, `repeatPrompt`, and
+`repeatDelayMs`. Stock elements expose their pinned descriptor as `.configuration`.
+Ready requests use descriptors, not bare ID strings; custom UIs must send this
+protocol and existing project-owned stock modules must be updated explicitly.
+
 Events are `message`, `tool`, `status`, `run`, `connected`, `workspace-state`,
-`disposed`, `saved`, `error`, `web-attention`, `web-progress`, and `backend-state`.
-Only a matching terminal `run` receipt completes a run, not SDK idle. `connected`
-provides URL/model/busy/current run; `workspace-state` reports aggregate `busy`
-and `reloading`. `disposed` releases an ID. Backend state reports `configured`,
+`execution-state`, `disposed`, `saved`, `error`, `web-attention`, `web-progress`,
+and `backend-state`. Only a matching terminal `run` receipt completes a run,
+not SDK idle. `connected` provides URL/model/busy/current run/effective tools;
+`workspace-state` reports aggregate `busy` and `reloading`. `execution-state`
+reports `armed`, `running`, or `stopped`. `disposed` releases an ID. Backend state reports `configured`,
 `override`, `effective`, and `source`; reconnect publishes authoritative state.
-See `src/protocol.ts` for exact shapes.
+A `message` update may carry `thinkingEnd` with the SDK's completed reasoning-block
+index; normal rendering still uses its message snapshot. See `src/protocol.ts` for
+exact shapes.
 
 Replacing the UI requires the scoped receiver, acknowledgments, agent lifecycle,
 ready handshake, and context collector—not a particular rendering layout. Keep
@@ -419,11 +666,20 @@ unsafe Chromium-only opt-out. The native bridge is main-frame-only, although
 trusted same-origin frames can deliberately use their parent's APIs.
 
 This is a trusted-user application, not a multi-tenant security sandbox.
-Same-origin scripts can submit model requests, modify/delete public files, and
-use browser networking. Research networking is not restricted to public IPs like
-the Source downloader. Review executable third-party code, keep provider secrets
-out of the page, and keep listener/debugging ports private. Host processes with
-your OS permissions can access private state.
+By default, same-origin scripts can submit model requests, modify/delete public
+files, and use browser networking. Research networking is not restricted to public
+IPs like the Source downloader. Review executable third-party code, keep provider
+secrets out of the page, and keep listener/debugging ports private. Host processes
+with your OS permissions can access private state.
+
+`network:"local"` uses a response-header CSP and debugger request/navigation
+controls to block ordinary external page access. Same-origin GET/listing remains
+available when allowed by `http`; data/blob images and inline CSS remain usable.
+External scripts, frames, workers, forms, and research tools are unavailable.
+CORS alone is not an outbound firewall, and these controls are not OS-enforced
+network isolation: browser background traffic and deliberate bypass attempts are
+outside this guarantee. Every agent shares the page and can modify peers and UI.
+The mode is intended to keep agents operating locally, not execute hostile code.
 
 ## Development and packaging
 
@@ -462,11 +718,15 @@ and updates Pagent's local dependency and lockfile. It does not publish anything
 Run focused checks, not the full suite. Browser-heavy files run serially:
 
 ```sh
+node --test test/config.test.ts test/recording.test.ts test/agent-config.test.ts test/execution.test.ts
+node --test --test-concurrency=1 test/configured-agents.test.ts test/execution-shutdown.test.ts test/recording-events.test.ts test/server-policy.test.ts test/browser-policy.test.ts
 node --test --test-concurrency=1 test/storage.test.ts test/server.test.ts test/recovery.test.ts
 node --test --test-concurrency=1 test/browser-default.test.ts test/engine-model.test.ts test/cli.test.ts test/packaging.test.ts
 node --test --test-concurrency=1 test/e2e.test.ts test/lifecycle.test.ts test/workspace-lifecycle.test.ts
 node --test --test-concurrency=1 test/agents.test.ts test/agents-web.test.ts test/runs.test.ts
+node --test --test-concurrency=1 test/persistence.test.ts test/persistent-runs.test.ts test/template.test.ts
 node --test --test-concurrency=1 test/web-integration.test.ts test/web-snapshots.test.ts test/agent-output.test.ts
+node --test --test-concurrency=1 test/public-html.test.ts test/paragraphs.test.ts
 node --test --test-concurrency=1 test/diagnostics.test.ts test/evaluation-queue.test.ts test/transport.test.ts
 
 # Optional real public CSV/CDN bytes; still no paid model calls.

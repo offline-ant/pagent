@@ -4,7 +4,8 @@ import { Cdp, object, type CdpObject } from "pi-browser/cdp";
 import { chromiumConsoleText, syntheticConsole, logLocation } from "./browser-log.ts";
 import type { BrowserPageOptions, EvaluationResult, HostEvent, PageBrowser } from "./protocol.ts";
 import type { ChromiumBrowser } from "./chromium.ts";
-import { deliveryExpression, SNAPSHOT_EXPRESSION } from "./page-scripts.ts";
+import { deliveryExpression, mirrorExpression, SNAPSHOT_EXPRESSION } from "./page-scripts.ts";
+import { localResource } from "./browser-policy.ts";
 import { EvaluationQueue } from "./evaluation-queue.ts";
 
 function remoteValue(value: unknown): unknown {
@@ -134,12 +135,16 @@ export class ChromiumPage implements PageBrowser {
       const request = object(params.request);
       const topLevel = params.frameId === this.frameId;
       const url = String(request.url);
-      const permitted = !topLevel || new URL(url).origin === this.origin;
+      const permitted = this.options.network === "local"
+        ? (params.resourceType === "Document" ? topLevel && new URL(url).origin === this.origin : localResource(url, this.origin))
+        : !topLevel || new URL(url).origin === this.origin;
       const action = permitted ? "Fetch.continueRequest" : "Fetch.failRequest";
       const arguments_: CdpObject = { requestId: params.requestId };
       if (!permitted) {
         arguments_.errorReason = "BlockedByClient";
-        this.report(new Error(`Blocked main-tab navigation outside workspace origin: ${url}`));
+        this.report(new Error(this.options.network === "local"
+          ? `Blocked request by local network policy: ${url}`
+          : `Blocked main-tab navigation outside workspace origin: ${url}`));
       }
       void this.cdp.request(action, arguments_).catch(error => { if (!this.closed) this.report(error as Error); });
     }
@@ -162,9 +167,9 @@ export class ChromiumPage implements PageBrowser {
         globalThis.aos = port;
       })()`,
     });
-    await this.cdp.request("Fetch.enable", { patterns: [{ urlPattern: "*", resourceType: "Document", requestStage: "Request" }] });
+    await this.cdp.request("Fetch.enable", { patterns: [{ urlPattern: "*", ...(this.options.network === "local" ? {} : { resourceType: "Document" }), requestStage: "Request" }] });
     await this.cdp.request("Emulation.setDeviceMetricsOverride", {
-      width: 1440, height: 1100, deviceScaleFactor: 1, mobile: false,
+      ...(this.options.viewport ?? { width: 1440, height: 1100 }), deviceScaleFactor: 1, mobile: false,
     });
     await this.reload();
     await this.cdp.request("Page.bringToFront");
@@ -242,9 +247,9 @@ export class ChromiumPage implements PageBrowser {
     }
   }
 
-  async evaluateValue(expression: string): Promise<unknown> {
+  async evaluateValue(expression: string, source = "pagent-internal"): Promise<unknown> {
     const response = await this.cdp.request("Runtime.evaluate", {
-      expression: `${expression}\n//# sourceURL=pagent-internal`,
+      expression: `${expression}\n//# sourceURL=${source}`,
       uniqueContextId: this.context(), awaitPromise: true, returnByValue: true, timeout: 5_000,
     }, 7_000);
     if (response.exceptionDetails) throw new Error(evaluationError(response.exceptionDetails));
@@ -272,7 +277,26 @@ export class ChromiumPage implements PageBrowser {
   }
 
   async deliver(event: HostEvent): Promise<void> {
+    await this.evaluateValue(mirrorExpression(event), "pagent-agent-mirror");
     await this.evaluateValue(deliveryExpression(event));
+  }
+
+  async captureFrame(options: { screenshot: boolean }): Promise<{ html: string; screenshot?: string }> {
+    this.context();
+    // Isolated built-ins cannot be replaced by page code. No console queue, events,
+    // checkpoint writes, or execution termination on a missed capture deadline.
+    const world = await this.cdp.request("Page.createIsolatedWorld", { frameId: this.frameId, worldName: "pagent-recorder" }, 2_000);
+    const response = await this.cdp.request("Runtime.evaluate", {
+      expression: SNAPSHOT_EXPRESSION, contextId: world.executionContextId,
+      returnByValue: true, awaitPromise: false, timeout: 2_000,
+    }, 2_500);
+    if (response.exceptionDetails) throw new Error(evaluationError(response.exceptionDetails));
+    const html = remoteValue(response.result);
+    if (typeof html !== "string") throw new Error("Document serialization did not return HTML");
+    if (!options.screenshot) return { html };
+    const image = await this.cdp.request("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: false }, 2_500);
+    if (typeof image.data !== "string") throw new Error("Chromium did not return a screenshot");
+    return { html, screenshot: image.data };
   }
 
   async screenshot(): Promise<string> {

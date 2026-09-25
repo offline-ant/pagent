@@ -46,7 +46,7 @@ for (const browser of ["chromium", "firefox"] as const) {
       assert.equal(await session.browser.evaluateValue(`$('#main').outputs[0].messages.length`), 1);
       await session.browser.evaluateValue(`(() => {
         $('#main').outputs[0].render=goodRender;
-        aos.send({type:'ready',after:Number(document.documentElement.dataset.pagentSeq),agents:pagent.agents.map(a=>a.id)});
+        aos.send({type:'ready',after:Number(document.documentElement.dataset.pagentSeq),agents:pagent.agents.map(a=>a.configuration)});
       })()`);
       await eventually(async () => await session.browser.evaluateValue(`$('#main').canSubmit && $('#main').result === 'retained once'`) === true, "repair/replay did not reconnect");
       await session.flush();
@@ -131,7 +131,7 @@ for (const browser of ["chromium", "firefox"] as const) {
         }
         return deliver(record);
       };
-      await session.browser.evaluateValue(`aos.send({type:'ready',after:Number(document.documentElement.dataset.pagentSeq),agents:['main']})`);
+      await session.browser.evaluateValue(`aos.send({type:'ready',after:Number(document.documentElement.dataset.pagentSeq),agents:[{agentId:'main'}]})`);
       await eventually(async () => await session.browser.evaluateValue(`$('#main').state.notice.includes('Unsupported native request')`) === true, "concurrent error was skipped by higher reconnect cursor");
       await session.flush();
       assert.equal(injected, true);

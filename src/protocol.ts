@@ -1,4 +1,7 @@
 import type { WebAttention, WebBackend, WebBackendState } from "pi-browser/web";
+import type { AgentConfiguration, ExecutionState, ToolName, CheckpointPolicy } from "./agent-config.ts";
+
+export interface AgentDescriptor extends AgentConfiguration { agentId: string }
 
 export interface AgentRun {
   id: string;
@@ -11,12 +14,13 @@ export interface AgentRun {
 
 /** Browser-owned protocol. Host records carry sequence numbers for reconnect/deduplication. */
 export type AgentEvent =
-  | { type: "message"; phase: "start" | "update" | "end"; message: unknown }
+  | { type: "message"; phase: "start" | "update" | "end"; message: unknown; thinkingEnd?: number }
   | { type: "tool"; phase: "start" | "update" | "end"; callId: string; name: string; args?: unknown; result?: unknown; isError?: boolean }
   | { type: "status"; status: "running" | "idle"; model?: string }
   | { type: "error"; message: string }
   | { type: "saved"; revision: string }
-  | { type: "connected"; url: string; model: string; busy: boolean; run?: AgentRun }
+  | { type: "connected"; url: string; model: string; busy: boolean; run?: AgentRun; tools?: ToolName[] }
+  | { type: "execution-state"; state: ExecutionState }
   | { type: "workspace-state"; busy: boolean; reloading?: boolean }
   | { type: "disposed" }
   | { type: "run"; run: AgentRun }
@@ -33,10 +37,11 @@ export interface HostEvent {
 }
 
 export type NativeRequest =
-  | { type: "ready"; after: number; agents: string[] }
-  | { type: "register"; agentId: string }
+  | { type: "ready"; after: number; agents: AgentDescriptor[] }
+  | ({ type: "register" } & AgentDescriptor)
+  | { type: "start" | "nudge" | "stop" }
   | { type: "dispose"; agentId: string }
-  | { type: "submit"; agentId: string; id: string; runId: string }
+  | { type: "submit"; agentId: string; id: string; runId: string; scheduleId?: string }
   | { type: "cancel"; agentId: string }
   | { type: "save" }
   | { type: "reload" }
@@ -81,6 +86,9 @@ export interface BrowserLog {
 
 export interface BrowserPageOptions {
   url: string;
+  /** Relaxed same-origin networking policy, not an OS sandbox. */
+  network?: "open" | "local";
+  viewport?: { width: number; height: number };
   onRequest: (request: unknown) => void;
   /** Called synchronously when the controlled runtime is invalidated. */
   onRuntimeReset?: () => void;
@@ -107,6 +115,10 @@ export interface PageBrowser {
   reload(): Promise<void>;
   deliver(event: HostEvent): Promise<void>;
   screenshot(): Promise<string>;
+  /** Private read-only sampling, independent of the ordered console queue. */
+  captureFrame?(options: { screenshot: boolean }): Promise<{ html: string; screenshot?: string }>;
+  /** Terminal shutdown: disable runtime recovery without destroying the live page before final capture. */
+  prepareToStop?(): void;
   close(): Promise<void>;
 }
 
@@ -128,6 +140,13 @@ export interface EngineOptions {
   model?: string;
   thinking?: string;
   fake?: boolean;
+  systemPrompt?: string;
+  tools?: ToolName[];
+  http?: string[];
+  network?: "open" | "local";
+  checkpoint?: CheckpointPolicy;
+  /** Stops model and tool dispatch independently of page cooperation. */
+  blocked?: () => boolean;
   browserKind?: BrowserKind;
   webProfileDir?: string;
   /** Private agent-scoped evidence; retained independently of engine/browser lifetime. */

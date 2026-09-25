@@ -20,7 +20,7 @@ for (const engine of ["chromium", "firefox"] as const) {
       response.setHeader("Cache-Control", "no-store");
       try {
         const resource = request.url?.slice(1) ?? "";
-        if (["agent.js", "agent-connection.js", "agent-controls.js", "p-agent.js", "user-input.js", "agent-output.js", "dom.js", "paragraphs.js", "agent.css"].includes(resource)) {
+        if (["agent.js", "agent-persistence.js", "agent-connection.js", "agent-controls.js", "p-agent.js", "user-input.js", "agent-output.js", "dom.js", "paragraphs.js", "agent.css"].includes(resource)) {
           response.setHeader("Content-Type", resource.endsWith(".js") ? "text/javascript" : "text/css");
           response.end(await readFile(path.join(templateDir, resource)));
         } else {

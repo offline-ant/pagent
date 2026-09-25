@@ -34,6 +34,8 @@ test("active cap, rejected receipts, immutable IDs, and completion-order retenti
   assert.throws(() => runs.start("overflow", "extra", "input"), /concurrently/);
   runs.reject({ id: "overflow", agentId: "extra", inputId: "input", status: "error", result: "", error: "limit" });
   assert.equal((await runs.wait(slow.id, ["overflow"]))[0].error, "limit");
+  runs.reject({ id: "stale-schedule", agentId: "extra", inputId: "input", status: "cancelled", result: "" });
+  assert.equal((await runs.wait(slow.id, ["stale-schedule"]))[0].status, "cancelled");
   assert.throws(() => runs.start("slow", "one", "different"), /already exists/);
   for (const run of rest) runs.finish({ ...run, status: "complete", result: run.id });
   for (let i = 0; i < 140; i++) {

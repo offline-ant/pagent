@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { downloadSource } from "./source.ts";
+import { LOCAL_CONTENT_POLICY, validateBrowserPolicy } from "./browser-policy.ts";
 import { MAX_RESOURCE_BYTES, resourcePath, StorageError, type Workspace } from "./storage.ts";
 
 export interface ResourceServer {
@@ -77,7 +78,17 @@ async function body(request: IncomingMessage, signal: AbortSignal, empty: boolea
 export async function startServer(workspace: Workspace, options: {
   port?: number;
   downloadSource?: typeof downloadSource;
+  http?: string[];
+  network?: "open" | "local";
 } = {}): Promise<ResourceServer> {
+  validateBrowserPolicy(options);
+  const supported = ["GET", "HEAD", "POST", "PUT", "DELETE"];
+  if (options.http !== undefined && (!Array.isArray(options.http) || options.http.some(method => !supported.includes(method)) || new Set(options.http).size !== options.http.length)) {
+    throw new Error("HTTP methods must be unique values from GET, HEAD, POST, PUT, DELETE.");
+  }
+  const allowed = new Set(options.http ?? supported);
+  if (allowed.has("GET")) allowed.add("HEAD");
+  const allowHeader = supported.filter(method => allowed.has(method)).join(", ");
   const requestedPort = options.port ?? 0;
   if (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 65535) throw new Error("Port must be an integer from 0 to 65535.");
   const fetchSource = options.downloadSource ?? downloadSource;
@@ -89,6 +100,10 @@ export async function startServer(workspace: Workspace, options: {
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
     response.setHeader("Referrer-Policy", "no-referrer");
+    if (options.network === "local") {
+      response.setHeader("Content-Security-Policy", LOCAL_CONTENT_POLICY);
+      response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()");
+    }
     const client = new AbortController();
     const disconnect = () => client.abort(new StorageError(400, "Client disconnected."));
     response.once("close", disconnect);
@@ -104,6 +119,11 @@ export async function startServer(workspace: Workspace, options: {
       if (sourceCount && request.method !== "PUT") throw new StorageError(400, "Source is only allowed on PUT.");
       const source = request.headers.source;
       if (sourceCount && (typeof source !== "string" || !source.trim())) throw new StorageError(400, "Source must be a public HTTP(S) URL.");
+      if (!allowed.has(request.method ?? "")) {
+        response.setHeader("Allow", allowHeader);
+        throw new StorageError(405, "Method not allowed.");
+      }
+      if (sourceCount && options.network === "local") throw new StorageError(403, "Source downloads are disabled by the local network policy.");
       if (!request.url?.startsWith("/")) throw new StorageError(400, "Invalid request target.");
       // Preserve raw path spelling; new URL() would normalize literal dot segments away.
       const queryAt = request.url.indexOf("?");
@@ -144,7 +164,7 @@ export async function startServer(workspace: Workspace, options: {
         response.writeHead(204);
         response.end();
       } else {
-        response.setHeader("Allow", "GET, HEAD, POST, PUT, DELETE");
+        response.setHeader("Allow", allowHeader);
         throw new StorageError(405, "Method not allowed.");
       }
     })().catch((error: unknown) => {

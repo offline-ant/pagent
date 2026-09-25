@@ -15,7 +15,9 @@ function collectContext(agentId, inputId) {
   const selected = inputId === undefined ? undefined : agent.inputs.find(input => input.id === inputId);
   if (inputId !== undefined && !selected) throw new Error(`No user-input with id ${inputId} in agent ${agentId}`);
   const outline = document.body.cloneNode(true);
-  for (const node of outline.querySelectorAll("script,style,agent-memory,user-input,agent-output")) node.replaceChildren();
+  // Public output is ordinary light DOM, so it participates in the outline like
+  // other page text. Shadow transcripts are not traversed or injected here.
+  for (const node of outline.querySelectorAll("script,style,agent-memory,user-input")) node.replaceChildren();
   let markup = outline.outerHTML;
   if (markup.length > 16_000) markup = `${markup.slice(0, 16_000)}\n[Outline truncated at 16000 characters; inspect the live DOM for the rest.]`;
   const context = {
@@ -32,6 +34,10 @@ function collectContext(agentId, inputId) {
 
 window.pagent = {
   collectContext,
+  start() { connection.send({ type: "start" }); },
+  nudge() { connection.send({ type: "nudge" }); },
+  stop() { connection.send({ type: "stop" }); },
+  get executionState() { return connection.executionState; },
   get agents() { return connection.agents; }
 };
 

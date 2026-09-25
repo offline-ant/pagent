@@ -60,7 +60,7 @@ for (const browser of ["chromium", "firefox"] as const) {
       await app.browser.evaluateValue(`(() => {
         $(\"#main\").webBackend = {configured:'auto',override:'codex',effective:'codex',source:'override'};
         $(\"#main\").refresh();
-        aos.send({type:'ready',agents:pagent.agents.map(a=>a.id),after:$(\"#main\").lastSeq});
+        aos.send({type:'ready',agents:pagent.agents.map(a=>a.configuration),after:$(\"#main\").lastSeq});
       })()`);
       await waitFor(async () => await app!.browser.evaluateValue("$(\"#main\").webBackend?.override === null") === true);
       assert.deepEqual(await app.browser.evaluateValue("$(\"#main\").webBackend"), configured, "reconnect republishes authoritative backend state");

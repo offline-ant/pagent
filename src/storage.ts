@@ -29,6 +29,8 @@ export interface Workspace {
   list(resource: string): Promise<ResourceEntry[]>;
   remove(resource: string, options?: { signal?: AbortSignal }): Promise<void>;
   checkpoint(html: string): Promise<string>;
+  /** Store a revision without modifying the public starting document. */
+  checkpointPrivate(html: string): Promise<string>;
   close(): Promise<void>;
 }
 
@@ -229,6 +231,18 @@ export async function openWorkspace(options: WorkspaceOptions): Promise<Workspac
     return result;
   }
 
+  function checkpoint(html: string, publish: boolean): Promise<string> {
+    const bytes = Buffer.from(html);
+    if (bytes.length > MAX_RESOURCE_BYTES) return Promise.reject(new StorageError(413, "Document exceeds 16 MiB."));
+    return enqueue(async () => {
+      const revision = `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID()}.html`;
+      await atomicWrite(path.join(stateDirectory, "revisions", revision), bytes);
+      // A crash may leave an extra revision, but never a half-written root document.
+      if (publish) await atomicWrite(path.join(directory, "index.html"), bytes);
+      return revision;
+    });
+  }
+
   return {
     directory, stateDirectory,
     async read(resource) {
@@ -272,17 +286,8 @@ export async function openWorkspace(options: WorkspaceOptions): Promise<Workspac
         await syncDirectory(path.dirname(destination));
       });
     },
-    checkpoint(html) {
-      const bytes = Buffer.from(html);
-      if (bytes.length > MAX_RESOURCE_BYTES) return Promise.reject(new StorageError(413, "Document exceeds 16 MiB."));
-      return enqueue(async () => {
-        const revision = `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID()}.html`;
-        // A crash may leave an extra revision, but never a half-written root document.
-        await atomicWrite(path.join(stateDirectory, "revisions", revision), bytes);
-        await atomicWrite(path.join(directory, "index.html"), bytes);
-        return revision;
-      });
-    },
+    checkpoint: html => checkpoint(html, true),
+    checkpointPrivate: html => checkpoint(html, false),
     close() {
       closing = true;
       closed ??= writes.then(release);

@@ -16,6 +16,7 @@ export class FirefoxProcess {
   runtime?: FirefoxRuntime;
   recovery?: Promise<void>;
   closed = false;
+  stopping = false;
   private launcher: BrowserProcessLauncher;
   private lifecycle: Promise<unknown> = Promise.resolve();
   private closing?: Promise<void>;
@@ -37,6 +38,11 @@ export class FirefoxProcess {
     if (this.runtime !== runtime || this.closed) return;
     if (method === "browsingContext.contextCreated") {
       runtime.parents.set(String(params.context), typeof params.parent === "string" ? params.parent : null);
+      if (this.page.options.network === "local" && params.parent === null && this.page.state && params.context !== this.page.state.context) {
+        void runtime.bidi.request("browsingContext.close", { context: params.context }, 2_000).catch(error => {
+          if (!this.closed) this.page.report(error as Error);
+        });
+      }
     }
     this.page.receive(runtime, method, params);
     if (method === "browsingContext.contextDestroyed") runtime.parents.delete(String(params.context));
@@ -70,7 +76,7 @@ export class FirefoxProcess {
   }
 
   private async initialize(): Promise<void> {
-    if (this.closed || this.page.closed) throw new Error("The controlled browser is closed");
+    if (this.closed || this.page.closed || this.stopping) throw new Error("The controlled browser is closed or stopping");
     const process = await this.launcher.start();
     let bidi: Bidi | undefined;
     let runtime: FirefoxRuntime | undefined;
@@ -113,7 +119,7 @@ export class FirefoxProcess {
     const stopped = this.stop(runtime);
     const recovery = this.operation(async () => {
       await stopped;
-      if (restart && !this.closed && !this.page.closed) await this.initialize();
+      if (restart && !this.closed && !this.page.closed && !this.stopping) await this.initialize();
     });
     this.recovery = recovery;
     void recovery.finally(() => { if (this.recovery === recovery) this.recovery = undefined; }).catch(() => {});
@@ -122,7 +128,7 @@ export class FirefoxProcess {
 
   reload(): Promise<void> {
     return this.operation(async () => {
-      if (this.closed || this.page.closed) throw new Error("The controlled browser is closed");
+      if (this.closed || this.page.closed || this.stopping) throw new Error("The controlled browser is closed or stopping");
       if (!this.runtime) await this.initialize();
       else await this.page.navigate();
     });

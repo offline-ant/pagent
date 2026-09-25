@@ -9,7 +9,7 @@ import { launchBrowser } from "../src/browser.ts";
 import type { AgentEvent, HostEvent, PageBrowser } from "../src/protocol.ts";
 
 const templateDir = fileURLToPath(new URL("../template/", import.meta.url));
-const files = ["agent.js", "agent-connection.js", "agent-controls.js", "p-agent.js", "user-input.js", "agent-output.js", "dom.js", "paragraphs.js", "agent.css"];
+const files = ["agent.js", "agent-persistence.js", "agent-connection.js", "agent-controls.js", "p-agent.js", "user-input.js", "agent-output.js", "dom.js", "paragraphs.js", "agent.css"];
 
 for (const engine of ["chromium", "firefox"] as const) {
   test(`${engine}: independent page agents preserve append-only conversations, drafts, controls and replay`, { timeout: 70_000 }, async t => {
@@ -51,7 +51,7 @@ for (const engine of ["chromium", "firefox"] as const) {
     const connected = (agentId: string, busy = false, run?: unknown) => emit({ type: "connected", url, model: "fake/model", busy, run }, agentId);
     const setup = () => value(`window.$ = document.querySelector.bind(document); window.main = $('#main');`);
     await setup();
-    assert.deepEqual(requests.slice(), [{ type: "ready", after: 0, agents: ["main"] }], "initial element upgrade only sends ready, never redundant registration or inference");
+    assert.deepEqual(requests.slice(), [{ type: "ready", after: 0, agents: [{ agentId: "main" }] }], "initial element upgrade only sends ready, never redundant registration or inference");
     assert.equal(await value("main.shadowRoot.serializable && main.inputs[0].shadowRoot.serializable"), true);
     assert.equal(await value("'thread' in pagent || 'submit' in pagent"), false, "no privileged first-agent API");
     assert.equal(await value("main.canSubmit"), false);
@@ -319,7 +319,7 @@ for (const engine of ["chromium", "firefox"] as const) {
     const beforeReload = requests.length;
     await page.reload();
     await setup();
-    assert.deepEqual(requests.slice(beforeReload), [{ type: "ready", after: snapshotSeq, agents: ["main", "research"] }]);
+    assert.deepEqual(requests.slice(beforeReload), [{ type: "ready", after: snapshotSeq, agents: [{ agentId: "main" }, { agentId: "research" }] }]);
     assert.equal(await value("main.connected"), false);
     assert.equal(await value("main.webBackend"), null);
     assert.equal(await value("main.webAttention"), null);

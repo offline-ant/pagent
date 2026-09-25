@@ -26,13 +26,13 @@ export interface EngineModel {
 }
 
 /** Real engines share this resolved runtime; faux engines need independent response queues. */
-export async function resolveEngineModel(options: EngineModelOptions): Promise<EngineModel> {
+export async function resolveEngineModel(options: EngineModelOptions, sharedRuntime?: ModelRuntime): Promise<EngineModel> {
   const fake = options.fake ? createFakeModel() : undefined;
   // Read only global model preferences; do not load directory-local Pi resources/settings.
   const settings = fake ? SettingsManager.inMemory() : SettingsManager.create(process.cwd(), undefined, { projectTrusted: false });
   const errors = settings.drainErrors();
   if (errors.length) throw new Error(`Could not read Pi settings: ${errors.map(({ error }) => error.message).join("; ")}`);
-  const modelRuntime = await ModelRuntime.create(fake ? {
+  const modelRuntime = sharedRuntime ?? await ModelRuntime.create(fake ? {
     credentials: new InMemoryCredentialStore(), modelsPath: null,
     modelsStore: new InMemoryModelsStore(), allowModelNetwork: false, refreshOnCreate: false,
   } : { allowModelNetwork: false });

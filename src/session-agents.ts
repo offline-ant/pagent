@@ -7,10 +7,13 @@ import { MAX_AGENTS, Runs, terminal, validateAgentId } from "./runs.ts";
 import { WebAttentionCoordinator } from "./web-tools.ts";
 import { readWebBackendOverride, writeWebBackendOverride } from "./web-backend.ts";
 import type { AgentEngine, AgentEvent, AgentRun, BrowserKind, HostEvent, PageBrowser, PageContext } from "./protocol.ts";
+import { agentConfiguration, effectiveTools, TOOL_NAMES, type AgentConfiguration, type ToolName, type CheckpointPolicy } from "./agent-config.ts";
 
 export type EventScope = Pick<HostEvent, "agentId" | "requestId" | "runId">;
 interface AgentEntry {
   id: string;
+  configuration: AgentConfiguration;
+  tools: ToolName[];
   ready: Promise<AgentEngine>;
   attention: WebAttentionCoordinator;
   run?: AgentRun;
@@ -25,6 +28,12 @@ interface Options {
   browserKind: BrowserKind;
   browser: PageBrowser;
   webHeadless?: boolean;
+  tools?: ToolName[];
+  http?: string[];
+  network?: "open" | "local";
+  checkpoint?: CheckpointPolicy;
+  readResource?: (resource: string) => Promise<Buffer>;
+  completed?: (run: AgentRun) => void;
   diagnostics: () => unknown;
   readContext: (agentId: string, inputId?: string) => Promise<PageContext>;
   save: () => Promise<string>;
@@ -58,6 +67,8 @@ export class SessionAgents {
   get modelLabel(): string { return this.options.factory.modelLabel; }
   get busy(): boolean { return [...this.entries.values()].some(entry => entry.submission !== undefined); }
   get ids(): string[] { return [...this.entries.keys()]; }
+  get participants(): { id: string; configuration: AgentConfiguration }[] { return [...this.entries.values()].filter(entry => !entry.closing).map(entry => ({ id: entry.id, configuration: structuredClone(entry.configuration) })); }
+  idle(id: string): boolean { const entry = this.entries.get(id); return Boolean(entry && !entry.closing && !entry.submission); }
   disposal(id: string): Promise<void> | undefined { return this.entries.get(id)?.closing; }
   getBackendState(): WebBackendState { return { ...this.backend }; }
 
@@ -76,19 +87,34 @@ export class SessionAgents {
     return update;
   }
 
-  register(id: string): AgentEntry {
+  register(id: string, requested?: AgentConfiguration): AgentEntry {
     validateAgentId(id);
     if (this.stopped) throw new Error("Agent workspace is closing.");
     const existing = this.entries.get(id);
     if (existing?.closing) throw new Error(`Agent ${id} is still being disposed. Wait before reusing its ID.`);
-    if (existing) return existing;
+    if (existing) {
+      if (requested && JSON.stringify(agentConfiguration(requested)) !== JSON.stringify(existing.configuration)) throw new Error(`Agent ${id} configuration is pinned while attached; remove it before changing settings.`);
+      return existing;
+    }
+    const configuration = agentConfiguration(requested ?? {});
+    const tools = effectiveTools(configuration, this.options.tools ?? [...TOOL_NAMES], this.options.network ?? "open", this.options.checkpoint ?? "document");
     if ([...this.entries.values()].filter(entry => !entry.closing).length >= MAX_AGENTS) throw new Error(`At most ${MAX_AGENTS} agents may be attached to one workspace.`);
     const ready = Promise.withResolvers<AgentEngine>();
-    const entry: AgentEntry = { id, ready: ready.promise,
+    const entry: AgentEntry = { id, configuration, tools, ready: ready.promise,
       attention: new WebAttentionCoordinator(event => this.emit(entry, event)) };
     this.entries.set(id, entry);
-    void this.options.factory.create({
+    void (async () => {
+      let systemPrompt: string | undefined;
+      if (configuration.systemPrompt !== undefined) {
+        if (!this.options.readResource) throw new Error("This host cannot load system-prompt resources.");
+        const bytes = await this.options.readResource(configuration.systemPrompt);
+        if (bytes.length > 128 * 1024) throw new Error("System prompt exceeds 128 KiB.");
+        systemPrompt = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      }
+      return this.options.factory.create({
       cwd: this.options.directory, agentId: id, browserKind: this.options.browserKind, browser: this.options.browser,
+      model: configuration.model, systemPrompt, tools, http: this.options.http, network: this.options.network,
+      checkpoint: this.options.checkpoint, blocked: this.options.blocked,
       diagnostics: this.options.diagnostics, readContext: () => this.options.readContext(id), save: this.options.save,
       webProfileDir: join(this.options.stateDirectory, "research", createHash("sha256").update(id).digest("hex")),
       webSnapshotDirectory: join(this.options.stateDirectory, "web-snapshots", createHash("sha256").update(id).digest("hex")),
@@ -118,7 +144,8 @@ export class SessionAgents {
         }
         this.emit(entry, event);
       },
-    }).then(async engine => {
+      });
+    })().then(async engine => {
       this.engines.set(id, engine);
       await engine.setBackendOverride(this.backend.override);
       return engine;
@@ -131,11 +158,11 @@ export class SessionAgents {
     this.options.emit(event, { agentId: entry.id, ...(entry.run ? { requestId: entry.run.inputId, runId: entry.run.id } : {}) });
   }
 
-  async connectionEvents(id: string, url: string): Promise<{ event: AgentEvent; scope: EventScope }[]> {
-    const entry = this.register(id);
-    await entry.ready;
+  async connectionEvents(id: string, url: string, configuration?: AgentConfiguration): Promise<{ event: AgentEvent; scope: EventScope }[]> {
+    const entry = this.register(id, configuration);
+    const engine = await entry.ready;
     const events: AgentEvent[] = [
-      { type: "connected", url, model: this.modelLabel, busy: entry.submission !== undefined,
+      { type: "connected", url, model: engine.modelLabel, tools: entry.tools, busy: entry.submission !== undefined,
         ...(entry.run ? { run: structuredClone(entry.run) } : {}) },
       { type: "web-attention", request: entry.attention.current },
       { type: "backend-state", state: this.getBackendState() },
@@ -148,7 +175,10 @@ export class SessionAgents {
     let entry: AgentEntry;
     let run: AgentRun;
     try {
-      entry = this.register(agentId);
+      if (this.options.blocked()) throw new Error("Workspace is busy or execution has stopped. Wait before submitting.");
+      const registered = this.entries.get(agentId);
+      if (!registered || registered.closing) throw new Error(`Agent ${agentId} is not registered.`);
+      entry = registered;
       if (entry.submission) throw new Error("Agent is busy. Cancel or wait before submitting.");
       if (this.options.blocked()) throw new Error("Workspace is busy or shutting down. Wait before submitting.");
       run = this.runs.start(runId, agentId, inputId);
@@ -176,6 +206,7 @@ export class SessionAgents {
         if (!context.prompt?.trim()) throw new Error("collectContext(agentId, inputId) returned an empty prompt.");
         await this.options.save(); // Persist accepted input/branch before spending inference tokens.
         abort.signal.throwIfAborted();
+        if (this.options.blocked()) throw new Error("Execution has stopped.");
         status = await engine.submit({ id: runId, prompt: context.prompt, history: context.history });
         if (abort.signal.aborted) status = "cancelled";
       } catch (error) {
@@ -194,11 +225,19 @@ export class SessionAgents {
         entry.submission = undefined;
         entry.abort = undefined;
         this.options.changed();
+        this.options.completed?.(structuredClone(run));
       }
     });
     this.emit(entry, { type: "run", run });
     this.options.changed();
     return entry.submission;
+  }
+
+  rejectScheduled(agentId: string, inputId: string, runId: string): void {
+    if (this.runs.get(runId)) return;
+    const run: AgentRun = { id: runId, agentId, inputId, status: "cancelled", result: "", error: "Scheduled prompt was cancelled before submission." };
+    this.runs.reject(run);
+    this.options.emit({ type: "run", run }, { agentId, requestId: inputId, runId });
   }
 
   async cancel(id: string): Promise<void> {

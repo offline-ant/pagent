@@ -1,7 +1,8 @@
 import { BidiCommandError, object, remoteValue, type BidiObject } from "pi-browser/bidi";
 import { firefoxConsoleText, syntheticConsole, logLocation } from "./browser-log.ts";
 import type { FirefoxProcess, FirefoxRuntime } from "./firefox-process.ts";
-import { deliveryExpression, SNAPSHOT_EXPRESSION } from "./page-scripts.ts";
+import { deliveryExpression, mirrorExpression, SNAPSHOT_EXPRESSION } from "./page-scripts.ts";
+import { localResource } from "./browser-policy.ts";
 import { EvaluationQueue } from "./evaluation-queue.ts";
 import type { BrowserPageOptions, EvaluationResult, HostEvent, PageBrowser } from "./protocol.ts";
 
@@ -80,15 +81,19 @@ export class FirefoxPage implements PageBrowser {
         return typeof value === "string" ? value : JSON.stringify(value);
       }).join(" ");
       this.logs.entries.push(`${String(params.method)}: ${text}`.slice(0, 8_000));
-    } else if (method === "network.beforeRequestSent" && params.isBlocked === true && this.owner.belongs(runtime, String(params.context), state.context)) {
+    } else if (method === "network.beforeRequestSent" && params.isBlocked === true && (this.options.network === "local" || this.owner.belongs(runtime, String(params.context), state.context))) {
       const request = object(params.request);
       const url = String(request.url);
       const mainDocument = params.context === state.context && request.destination === "document";
-      const permitted = !mainDocument || new URL(url).origin === this.origin;
+      const permitted = this.options.network === "local"
+        ? (request.destination === "document" ? mainDocument && new URL(url).origin === this.origin : localResource(url, this.origin))
+        : !mainDocument || new URL(url).origin === this.origin;
       void runtime.bidi.request(permitted ? "network.continueRequest" : "network.failRequest", { request: request.request }).catch(error => {
         if (this.state === state && !this.closed) this.report(error as Error);
       });
-      if (!permitted) this.report(new Error(`Blocked main-tab navigation outside workspace origin: ${url}`));
+      if (!permitted) this.report(new Error(this.options.network === "local"
+        ? `Blocked request by local network policy: ${url}`
+        : `Blocked main-tab navigation outside workspace origin: ${url}`));
     }
   }
 
@@ -108,8 +113,8 @@ export class FirefoxPage implements PageBrowser {
       }`,
       arguments: [{ type: "channel", value: { channel: "pagent", ownership: "none", serializationOptions: { maxObjectDepth: 20 } } }],
     });
-    await runtime.bidi.request("network.addIntercept", { phases: ["beforeRequestSent"], contexts: [context] });
-    await runtime.bidi.request("browsingContext.setViewport", { context, viewport: { width: 1440, height: 1100 }, devicePixelRatio: 1 });
+    await runtime.bidi.request("network.addIntercept", { phases: ["beforeRequestSent"], ...(this.options.network === "local" ? {} : { contexts: [context] }) });
+    await runtime.bidi.request("browsingContext.setViewport", { context, viewport: this.options.viewport ?? { width: 1440, height: 1100 }, devicePixelRatio: 1 });
     await this.navigate();
   }
 
@@ -124,7 +129,7 @@ export class FirefoxPage implements PageBrowser {
     return this.evaluations.enqueue(() => this.runEvaluation(code, options, false), options.signal);
   }
 
-  private async runEvaluation(code: string, options: { signal?: AbortSignal; timeoutMs?: number }, internal: boolean): Promise<EvaluationResult> {
+  private async runEvaluation(code: string, options: { signal?: AbortSignal; timeoutMs?: number }, internal: boolean, source = "pagent-internal"): Promise<EvaluationResult> {
     const timeoutMs = options.timeoutMs ?? 15_000;
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("Evaluation timeout must be positive");
     const state = await this.current();
@@ -142,7 +147,7 @@ export class FirefoxPage implements PageBrowser {
       options.signal?.addEventListener("abort", abort, { once: true });
       const response = await Promise.race([
         state.runtime.bidi.request("script.evaluate", {
-          expression: internal ? `${code}\n//# sourceURL=pagent-internal` : code,
+          expression: internal ? `${code}\n//# sourceURL=${source}` : code,
           target: { realm: state.realm }, awaitPromise: true, resultOwnership: "none",
           serializationOptions: { maxObjectDepth: 20, maxDomDepth: 0 },
         }, timeoutMs + 1_000),
@@ -155,6 +160,9 @@ export class FirefoxPage implements PageBrowser {
     } catch (error) {
       if (this.closed || this.owner.closed) throw new Error("The controlled browser is closed");
       if (error instanceof BidiCommandError) return { value: { type: "undefined" }, logs, error: error.message };
+      // Terminal shutdown owns process termination. Never replace the live world
+      // while its recorder/checkpoint is finishing, even if an internal call fails.
+      if (this.owner.stopping) throw new Error(`${String(error)}; Firefox is stopping without runtime recovery`);
       // BiDi cannot terminate a script. Restart the workspace from saved HTML,
       // losing every page agent's unsaved DOM/runtime state.
       try { await this.owner.reset(state.runtime, !internal); }
@@ -170,8 +178,8 @@ export class FirefoxPage implements PageBrowser {
     }
   }
 
-  async evaluateValue(expression: string): Promise<unknown> {
-    const result = await this.runEvaluation(expression, { timeoutMs: 5_000 }, true);
+  async evaluateValue(expression: string, source = "pagent-internal"): Promise<unknown> {
+    const result = await this.runEvaluation(expression, { timeoutMs: 5_000 }, true, source);
     if (result.error) throw new Error(result.error);
     return result.value;
   }
@@ -191,7 +199,28 @@ export class FirefoxPage implements PageBrowser {
 
   reload(): Promise<void> { return this.owner.reload(); }
 
-  async deliver(event: HostEvent): Promise<void> { await this.evaluateValue(deliveryExpression(event)); }
+  async deliver(event: HostEvent): Promise<void> {
+    await this.evaluateValue(mirrorExpression(event), "pagent-agent-mirror");
+    await this.evaluateValue(deliveryExpression(event));
+  }
+
+  async captureFrame(options: { screenshot: boolean }): Promise<{ html: string; screenshot?: string }> {
+    const state = this.state;
+    if (this.closed || !state?.realm || this.owner.runtime !== state.runtime) throw new Error("Workspace execution context is unavailable for capture");
+    // A named sandbox has its own built-ins. Unlike internal control operations,
+    // a failed sample never resets Firefox or discards the shared live page.
+    const response = await state.runtime.bidi.request("script.evaluate", {
+      expression: SNAPSHOT_EXPRESSION, target: { context: state.context, sandbox: "pagent-recorder" },
+      awaitPromise: false, resultOwnership: "none",
+    }, 2_500);
+    if (response.type === "exception") throw new Error(String(object(response.exceptionDetails).text ?? "Document capture failed"));
+    const html = remoteValue(response.result);
+    if (typeof html !== "string") throw new Error("Document serialization did not return HTML");
+    if (!options.screenshot) return { html };
+    const image = await state.runtime.bidi.request("browsingContext.captureScreenshot", { context: state.context, origin: "viewport" }, 2_500);
+    if (typeof image.data !== "string") throw new Error("Firefox did not return a screenshot");
+    return { html, screenshot: image.data };
+  }
 
   async screenshot(): Promise<string> {
     const state = await this.current();
@@ -199,6 +228,8 @@ export class FirefoxPage implements PageBrowser {
     if (typeof response.data !== "string") throw new Error("Firefox did not return a screenshot");
     return response.data;
   }
+
+  prepareToStop(): void { this.owner.stopping = true; }
 
   close(): Promise<void> { return this.owner.close(); }
 }

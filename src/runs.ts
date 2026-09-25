@@ -55,7 +55,7 @@ export class Runs {
 
   reject(run: AgentRun): void {
     if (this.records.has(run.id)) return;
-    if (run.status !== "error") throw new Error("A rejected run must have error status.");
+    if (run.status !== "error" && run.status !== "cancelled") throw new Error("A rejected run must have error or cancelled status.");
     this.retain({ run: structuredClone(run), done: Promise.resolve(), resolve: () => {} });
   }
 

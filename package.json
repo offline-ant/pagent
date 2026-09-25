@@ -26,7 +26,7 @@
   "scripts": {
     "start": "node dist/main.js",
     "compile": "node scripts/compile.mjs",
-    "check": "tsc --noEmit && node --check template/agent.js && node --check template/agent-output.js && node --check template/dom.js && node --check template/paragraphs.js && node --check template/p-agent.js && node --check template/user-input.js && node --check template/agent-connection.js && node --check template/agent-controls.js"
+    "check": "tsc --noEmit && node --check template/agent.js && node --check template/agent-output.js && node --check template/dom.js && node --check template/paragraphs.js && node --check template/p-agent.js && node --check template/user-input.js && node --check template/agent-connection.js && node --check template/agent-controls.js && node --check template/agent-persistence.js"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.87.0",

@@ -3,6 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { BrowserProcessLauncher, type NativeBrowserProcess } from "pi-browser";
 import { Cdp, object, type CdpObject } from "pi-browser/cdp";
 import { ChromiumPage } from "./chromium-page.ts";
+import { validateBrowserPolicy } from "./browser-policy.ts";
 import type { BrowserOptions, BrowserPageOptions, PageBrowser } from "./protocol.ts";
 
 /** Only the controlled page receives the workspace bridge. */
@@ -45,6 +46,22 @@ export class ChromiumBrowser {
     const connection = await Cdp.connect(target.webSocketDebuggerUrl);
     if (this.closed) { connection.close(); throw new Error("The controlled browser is closed"); }
     this.page = new ChromiumPage(options, this, connection, target.id);
+    if (options.network === "local") {
+      const controlled = target.id;
+      this.cdp.onEvent((method, params) => {
+        if (method !== "Target.attachedToTarget" || this.closed) return;
+        const attached = object(params.targetInfo);
+        // Pause new top-level pages before their scripts/network activity, then
+        // close them. This is convenience confinement, not an OS sandbox.
+        const operation = attached.targetId === controlled
+          ? this.cdp.request("Runtime.runIfWaitingForDebugger", {}, 2_000, String(params.sessionId))
+          : this.cdp.request("Target.closeTarget", { targetId: attached.targetId }, 2_000);
+        void operation.catch(error => { if (!this.closed) options.onError?.(error as Error); });
+      });
+      await this.cdp.request("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true,
+        filter: [{ type: "page", exclude: false }, { exclude: true }] });
+      await this.cdp.request("Browser.setDownloadBehavior", { behavior: "deny" });
+    }
     await this.page.initialize();
     return this.page;
   }
@@ -63,6 +80,7 @@ export class ChromiumBrowser {
 }
 
 export async function launchChromium(options: BrowserOptions): Promise<PageBrowser> {
+  validateBrowserPolicy(options);
   const url = new URL(options.url);
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Workspace URL must use HTTP or HTTPS");
   const launcher = await BrowserProcessLauncher.create({ ...options, browser: "chromium", chromiumArgs: ["--no-proxy-server"] });

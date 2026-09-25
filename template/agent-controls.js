@@ -38,7 +38,9 @@ export function refreshControls(agent) {
   root.querySelector(".model").textContent = agent.state.model;
   const backend = root.querySelector("[data-web-backend]");
   backend.value = agent.webBackend?.override ?? "";
-  backend.disabled = !agent.connected || !agent.webBackend;
+  const webEnabled = !agent.allowedTools || agent.allowedTools.some(name => name.startsWith("web_"));
+  backend.closest("label").hidden = !webEnabled;
+  backend.disabled = !agent.connected || !agent.webBackend || !webEnabled;
   const labels = { auto: "Auto", codex: "Codex", browser: "Browser" };
   root.querySelector("[data-web-backend-state]").textContent = agent.webBackend ? `${labels[agent.webBackend.effective]} · ${agent.webBackend.source}` : "Connecting";
   backend.title = agent.webBackend ? `Configured default: ${labels[agent.webBackend.configured]}. Changes apply to subsequent web calls; active research is unchanged.` : "Waiting for host backend state.";
@@ -64,6 +66,9 @@ export function refreshControls(agent) {
   progress.textContent = agent.webProgress;
   progress.hidden = !agent.webProgress;
   root.querySelector("[data-cancel]").disabled = !agent.connected || !agent.state.busy;
-  root.querySelector("[data-save]").disabled = !agent.connected;
-  root.querySelector("[data-reload]").disabled = !agent.connected;
+  for (const name of ["save", "reload"]) {
+    const control = root.querySelector(`[data-${name}]`);
+    control.hidden = Boolean(agent.allowedTools && !agent.allowedTools.includes(name));
+    control.disabled = !agent.connected || connection.executionState === "stopped";
+  }
 }

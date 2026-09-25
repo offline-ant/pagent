@@ -41,6 +41,13 @@ export function prepareFakeResponse(fake: FauxProviderHandle, prompt: string): v
     fake.setResponses([context => fauxAssistantMessage(inspect(context))]);
     return;
   }
+  if (prompt.startsWith("/fake-think ")) {
+    fake.setResponses([fauxAssistantMessage([
+      fauxThinking("A completed local test reasoning block."),
+      { type: "text", text: prompt.slice("/fake-think ".length) },
+    ])]);
+    return;
+  }
   if (prompt.startsWith("/fake-say ")) {
     fake.setResponses([fauxAssistantMessage(prompt.slice("/fake-say ".length))]);
     return;

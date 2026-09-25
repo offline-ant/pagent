@@ -4,12 +4,14 @@ import type { AgentEvent, HostEvent } from "./protocol.ts";
 
 /** Transport outbox, not a hidden conversation. A checkpoint retires its delivered records. */
 export class EventJournal {
-  private filename: string;
+  private filename?: string;
   private records: HostEvent[] = [];
   private partials = new Map<string, HostEvent>();
   private sequence = 0;
 
-  constructor(directory: string) {
+  /** Omit the directory for page-lifetime delivery without durable replay. */
+  constructor(directory?: string) {
+    if (directory === undefined) return;
     this.filename = path.join(directory, "outbox.jsonl");
     if (!existsSync(this.filename)) return;
     const text = readFileSync(this.filename, "utf8");
@@ -38,8 +40,10 @@ export class EventJournal {
       this.partials.set(key, record);
     } else {
       this.partials.delete(key);
-      const fd = openSync(this.filename, "a", 0o600);
-      try { appendFileSync(fd, JSON.stringify(record) + "\n"); fsyncSync(fd); } finally { closeSync(fd); }
+      if (this.filename) {
+        const fd = openSync(this.filename, "a", 0o600);
+        try { appendFileSync(fd, JSON.stringify(record) + "\n"); fsyncSync(fd); } finally { closeSync(fd); }
+      }
       this.records.push(record);
     }
     return record;
@@ -55,7 +59,14 @@ export class EventJournal {
     this.rewrite();
   }
 
+  discard(): void {
+    this.records = [];
+    this.partials.clear();
+    this.rewrite();
+  }
+
   private rewrite(): void {
+    if (!this.filename) return;
     const temporary = `${this.filename}.tmp`;
     const fd = openSync(temporary, "w", 0o600);
     try {

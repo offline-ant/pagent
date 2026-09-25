@@ -51,6 +51,25 @@ test("partial coalescing isolates agent, run, request and tool identities", asyn
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test("ephemeral delivery never reads or changes the durable outbox and discards old page events", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "pagent-journal-memory-"));
+  try {
+    const filename = path.join(directory, "outbox.jsonl");
+    await writeFile(filename, "older durable evidence\n");
+    const journal = new EventJournal();
+    assert.deepEqual(journal.after(0), []);
+    const record = journal.append({ type: "status", status: "running" });
+    assert.deepEqual(journal.after(0), [record]);
+    journal.discard();
+    assert.deepEqual(journal.after(0), []);
+    const next = journal.append({ type: "status", status: "idle" });
+    assert.ok(next.seq > record.seq, "discarding a runtime does not reuse sequence IDs");
+    journal.checkpoint(next.seq);
+    assert.deepEqual(journal.after(0), []);
+    assert.equal(await readFile(filename, "utf8"), "older durable evidence\n");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("outbox recovers only an incomplete final append and rejects damaged complete records", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "pagent-journal-"));
   const filename = path.join(directory, "outbox.jsonl");
