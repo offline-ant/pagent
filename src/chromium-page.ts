@@ -181,11 +181,11 @@ export class ChromiumPage implements PageBrowser {
     return this.contextUniqueId;
   }
 
-  evaluate(code: string, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<EvaluationResult> {
+  evaluate(code: string, options: { signal?: AbortSignal; timeoutMs?: number; preserveOnAbort?: () => boolean } = {}): Promise<EvaluationResult> {
     return this.evaluations.enqueue(() => this.runEvaluation(code, options), options.signal);
   }
 
-  private async runEvaluation(code: string, options: { signal?: AbortSignal; timeoutMs?: number }): Promise<EvaluationResult> {
+  private async runEvaluation(code: string, options: { signal?: AbortSignal; timeoutMs?: number; preserveOnAbort?: () => boolean }): Promise<EvaluationResult> {
     const timeoutMs = options.timeoutMs ?? 15_000;
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("Evaluation timeout must be positive");
     if (options.signal?.aborted) throw new Error("Browser evaluation cancelled");
@@ -196,13 +196,16 @@ export class ChromiumPage implements PageBrowser {
     let interrupted: Error | undefined;
     let terminate: Promise<unknown> | undefined;
     let rejectInterrupt: (error: Error) => void = () => {};
-    const interrupt = (message: string) => {
+    const interrupt = (message: string, preserve = false) => {
       if (interrupted) return;
       interrupted = new Error(message);
-      terminate = this.cdp.request("Runtime.terminateExecution", {}, 3_000).catch(() => {});
+      if (!preserve) terminate = this.cdp.request("Runtime.terminateExecution", {}, 3_000).catch(() => {});
       rejectInterrupt(interrupted);
     };
-    const abort = () => interrupt("Browser evaluation cancelled; JavaScript execution terminated");
+    const abort = () => {
+      const preserve = options.preserveOnAbort?.() ?? false;
+      interrupt(preserve ? "Browser evaluation detached for deadline pause; JavaScript may continue in the live page" : "Browser evaluation cancelled; JavaScript execution terminated", preserve);
+    };
     try {
       const interruption = new Promise<never>((_resolve, reject) => {
         rejectInterrupt = reject;

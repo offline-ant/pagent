@@ -125,11 +125,11 @@ export class FirefoxPage implements PageBrowser {
     return this.state;
   }
 
-  evaluate(code: string, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<EvaluationResult> {
+  evaluate(code: string, options: { signal?: AbortSignal; timeoutMs?: number; preserveOnAbort?: () => boolean } = {}): Promise<EvaluationResult> {
     return this.evaluations.enqueue(() => this.runEvaluation(code, options, false), options.signal);
   }
 
-  private async runEvaluation(code: string, options: { signal?: AbortSignal; timeoutMs?: number }, internal: boolean, source = "pagent-internal"): Promise<EvaluationResult> {
+  private async runEvaluation(code: string, options: { signal?: AbortSignal; timeoutMs?: number; preserveOnAbort?: () => boolean }, internal: boolean, source = "pagent-internal"): Promise<EvaluationResult> {
     const timeoutMs = options.timeoutMs ?? 15_000;
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("Evaluation timeout must be positive");
     const state = await this.current();
@@ -138,7 +138,11 @@ export class FirefoxPage implements PageBrowser {
     if (!internal) this.logs = { state, entries: logs };
     let timer: ReturnType<typeof setTimeout> | undefined;
     let rejectInterrupt: (error: Error) => void = () => {};
-    const abort = () => rejectInterrupt(new Error("Browser evaluation cancelled"));
+    let preserve = false;
+    const abort = () => {
+      preserve = options.preserveOnAbort?.() ?? false;
+      rejectInterrupt(new Error(preserve ? "Browser evaluation detached for deadline pause; JavaScript may continue in the live page" : "Browser evaluation cancelled"));
+    };
     try {
       const interruption = new Promise<never>((_resolve, reject) => {
         rejectInterrupt = reject;
@@ -159,6 +163,7 @@ export class FirefoxPage implements PageBrowser {
       };
     } catch (error) {
       if (this.closed || this.owner.closed) throw new Error("The controlled browser is closed");
+      if (preserve) throw error;
       if (error instanceof BidiCommandError) return { value: { type: "undefined" }, logs, error: error.message };
       // Terminal shutdown owns process termination. Never replace the live world
       // while its recorder/checkpoint is finishing, even if an internal call fails.

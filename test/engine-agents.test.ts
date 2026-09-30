@@ -221,13 +221,13 @@ test("identity and fresh diagnostics accompany every model request without separ
 
 test("exact configured system prompt replaces default guidance and only selected tools reach the model", async () => {
   const { options, events } = harness("configured");
-  options.systemPrompt = "An exact operator prompt.\nNo appended instructions.";
+  const systemPrompt = "An exact operator prompt.\nNo appended instructions.";
   options.tools = ["console"];
   const engine = await createEngine(options);
   try {
-    await engine.submit({ id: "inspect", prompt: "/fake-inspect", history: [] });
+    await engine.submit({ id: "inspect", prompt: "/fake-inspect", systemPrompt, history: [] });
     const inspected = JSON.parse(answer(events)) as { systemPrompt: string; tools: { name: string }[] };
-    assert.equal(inspected.systemPrompt, options.systemPrompt);
+    assert.equal(inspected.systemPrompt, systemPrompt);
     assert.deepEqual(inspected.tools.map(tool => tool.name), ["console"]);
     options.blocked = () => true;
     await assert.rejects(engine.submit({ id: "stopped", prompt: "/fake-inspect", history: [] }), /stopped/);

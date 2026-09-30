@@ -34,7 +34,7 @@ export function refreshControls(agent) {
   root.querySelector(".agent-badge").textContent = agent.id;
   const status = root.querySelector(".status");
   status.dataset.status = agent.status;
-  status.textContent = connection.reloading ? "Reloading" : agent.status === "waiting" ? "Waiting" : agent.state.busy ? "Working" : agent.connected ? "Ready" : "Connecting";
+  status.textContent = ["pausing", "paused"].includes(connection.executionState) ? "Paused" : connection.reloading ? "Reloading" : agent.status === "waiting" ? "Waiting" : agent.state.busy ? "Working" : agent.connected ? "Ready" : "Connecting";
   root.querySelector(".model").textContent = agent.state.model;
   const backend = root.querySelector("[data-web-backend]");
   backend.value = agent.webBackend?.override ?? "";

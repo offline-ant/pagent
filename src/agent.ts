@@ -135,8 +135,7 @@ function emitSessionEvent(options: EngineOptions, event: AgentSessionEvent): voi
 }
 
 /** Only the host's context hook; no discovered resources or filesystem context reach the model. */
-async function resources(options: EngineOptions, contextFailed: (error: Error) => void): Promise<ResourceLoader> {
-  const systemPrompt = options.systemPrompt ?? buildSystemPrompt(options.browserKind ?? "chromium", options);
+async function resources(options: EngineOptions, systemPrompt: string, contextFailed: (error: Error) => void): Promise<ResourceLoader> {
   const extension: Extension = {
     path: "<pagent>", resolvedPath: "<pagent>",
     sourceInfo: createSyntheticSourceInfo("<pagent>", { source: "pagent" }),
@@ -245,8 +244,9 @@ async function createConfiguredEngine(options: EngineOptions, selected: EngineMo
       name: "console", label: "Console",
       description: "Evaluate JavaScript in the persistent page and await promises. Returns result, logs, and errors inline, limited to 50 KiB / 2000 lines. Top-level declarations persist until reload. " +
         (options.browserKind === "firefox"
-          ? "Firefox: use Promise expressions or async IIFEs, not bare top-level await; do not redeclare existing let/const bindings. Timeout/cancellation of running code restarts the workspace browser from saved HTML, losing unsaved DOM/runtime state for all agents in the page."
-          : "Chromium: top-level await and REPL let redeclaration are supported. Timeout/cancellation terminates running code without reloading."),
+          ? "Firefox: use Promise expressions or async IIFEs, not bare top-level await; do not redeclare existing let/const bindings. Timeout/ordinary cancellation of running code restarts the workspace browser from saved HTML, losing unsaved DOM/runtime state for all agents in the page."
+          : "Chromium: top-level await and REPL let redeclaration are supported. Timeout/ordinary cancellation terminates running code without reloading.") +
+        " An optional host deadline pause instead detaches a running evaluation in either browser: its JavaScript may continue, but inference stops until the host operator authorizes a new interval.",
       parameters: Type.Object({ code: Type.String({ minLength: 1, maxLength: 128 * 1024 }) }),
       async execute(_id, params, signal) {
         signal?.throwIfAborted();
@@ -303,7 +303,7 @@ async function createConfiguredEngine(options: EngineOptions, selected: EngineMo
       cwd: options.cwd, model, modelRuntime, thinkingLevel,
       sessionManager: manager,
       settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false }, enableInstallTelemetry: false }),
-      resourceLoader: await resources(options, error => { contextError = error; activeSession?.agent.abort(); }),
+      resourceLoader: await resources(options, input.systemPrompt ?? buildSystemPrompt(options.browserKind ?? "chromium", options), error => { contextError = error; activeSession?.agent.abort(); }),
       noTools: "builtin", tools, customTools,
     });
     const session = created.session;

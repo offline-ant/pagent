@@ -14,22 +14,22 @@ test("explicit kickoff concurrently nudges configured participants and repeats o
   const execution = new Execution({
     repeatDelayMs: 5,
     participants: () => [
-      { id: "a", configuration: { mode: "continuous", repeatPrompt: "do something" } },
-      { id: "b", configuration: { repeatPrompt: "once" } },
+      { id: "a", configuration: { mode: "continuous", repeatPromptSource: { kind: "raw", value: "do something" } } },
+      { id: "b", configuration: { repeatPromptSource: { kind: "raw", value: "once" } } },
       { id: "c", configuration: {} },
     ],
-    prompt: async (id, text) => { calls.push(`${id}:${text}`); }, flush: async () => { flushed++; }, cancel: async () => {},
+    prompt: async id => { calls.push(id); }, flush: async () => { flushed++; }, cancel: async () => {},
     changed: () => {}, onStart: async () => { starts++; }, onStop: async () => { stops++; }, log: () => {},
   });
   assert.equal(execution.state, "armed");
   assert.equal(execution.blocked, false);
   await execution.start();
-  assert.deepEqual(calls, ["a:do something", "b:once"]);
+  assert.deepEqual(calls, ["a", "b"]);
   execution.completed(complete("a"));
   execution.completed(complete("b"));
   await delay(30);
   assert.equal(flushed, 1);
-  assert.deepEqual(calls, ["a:do something", "b:once", "a:do something"]);
+  assert.deepEqual(calls, ["a", "b", "a"]);
   execution.completed(complete("a", "error"));
   execution.completed(complete("a", "cancelled"));
   await delay(20);
@@ -66,7 +66,7 @@ test("pause and disposal invalidate pending delivery waits, not just existing ti
   let release!: () => void;
   let calls = 0;
   const execution = new Execution({ repeatDelayMs: 0,
-    participants: () => [{ id: "a", configuration: { mode: "continuous", repeatPrompt: "again" } }],
+    participants: () => [{ id: "a", configuration: { mode: "continuous", repeatPromptSource: { kind: "raw", value: "again" } } }],
     prompt: async () => { calls++; }, flush: () => new Promise<void>(resolve => { release = resolve; }),
     cancel: async () => {}, changed: () => {}, log: () => {},
   });
@@ -110,8 +110,8 @@ test("pause invalidates a prompt already waiting to dispatch and stale browser s
   let calls = 0;
   let scheduleId = "";
   const execution = new Execution({
-    participants: () => [{ id: "a", configuration: { mode: "continuous", repeatPrompt: "again" } }],
-    prompt: async (_id, _text, token, current) => {
+    participants: () => [{ id: "a", configuration: { mode: "continuous", repeatPromptSource: { kind: "raw", value: "again" } } }],
+    prompt: async (_id, token, current) => {
       scheduleId = token;
       waiting.resolve();
       await release.promise;
@@ -130,6 +130,83 @@ test("pause invalidates a prompt already waiting to dispatch and stale browser s
   assert.equal(execution.accept("a", scheduleId), true);
   assert.equal(execution.accept("a", scheduleId), false, "a scheduled submission is admitted once");
   await execution.stop();
+});
+
+test("deadline pauses gate admission while cancellation settles and host continuation preserves only the original cohort", async () => {
+  const cancellation = Promise.withResolvers<void>();
+  const states: string[] = [];
+  const calls: string[] = [];
+  let starts = 0;
+  let token = "";
+  const participants = [{ id: "a", configuration: { mode: "continuous" as const, repeatPromptSource: { kind: "raw" as const, value: "again" } } }];
+  const execution = new Execution({ durationMs: 30, deadlinePolicy: "pause", repeatDelayMs: 0,
+    participants: () => participants, prompt: async (id, scheduleId) => { calls.push(id); token = scheduleId; },
+    flush: async () => {}, cancel: () => cancellation.promise,
+    changed: state => states.push(state), onStart: async () => { starts++; }, log: () => {},
+  });
+  await execution.start();
+  const stale = token;
+  await delay(50);
+  assert.equal(execution.state, "pausing");
+  assert.equal(execution.blocked, true);
+  assert.equal(execution.accept("a", stale), false);
+  await assert.rejects(execution.continue(), /pausing/);
+  await assert.rejects(execution.start(), /operator/);
+  execution.completed(complete("a"));
+  cancellation.resolve();
+  await delay(0);
+  assert.equal(execution.state, "paused");
+  participants.push({ id: "late", configuration: { mode: "continuous", repeatPromptSource: { kind: "raw", value: "not in cohort" } } });
+  await execution.continue();
+  assert.notEqual(token, stale);
+  assert.equal(execution.accept("a", stale), false);
+  assert.deepEqual(calls, ["a", "a"]);
+  assert.equal(starts, 2);
+  await delay(50);
+  assert.equal(execution.state, "paused");
+  assert.deepEqual(states, ["running", "pausing", "paused", "running", "pausing", "paused"]);
+  await execution.stop();
+  await assert.rejects(execution.continue(), /pausing/);
+});
+
+test("host observers can terminally stop transitions without re-entering cleanup or starting late", async () => {
+  let starts = 0;
+  let stops = 0;
+  let execution: Execution;
+  execution = new Execution({ participants: () => [], prompt: async () => {}, flush: async () => {}, cancel: async () => {},
+    changed: state => { if (state === "running" || state === "stopped") void execution.stop(); },
+    onStart: async () => { starts++; }, onStop: async () => { stops++; }, log: () => {},
+  });
+  await execution.start();
+  await execution.stop();
+  assert.equal(execution.state, "stopped");
+  assert.equal(starts, 0);
+  assert.equal(stops, 1);
+});
+
+test("a deadline joins old startup before allowing continuation and explicit stop wins over pause", async () => {
+  const startup = Promise.withResolvers<void>();
+  const pause = Promise.withResolvers<void>();
+  let calls = 0;
+  const execution = new Execution({ durationMs: 25, deadlinePolicy: "pause",
+    participants: () => [{ id: "a", configuration: { repeatPromptSource: { kind: "raw", value: "again" } } }],
+    prompt: async () => { calls++; }, flush: async () => {}, cancel: async () => {},
+    onStart: () => startup.promise, onPause: () => pause.promise, changed: () => {}, log: () => {},
+  });
+  const starting = execution.start();
+  await delay(40);
+  assert.equal(execution.state, "pausing");
+  await assert.rejects(execution.continue(), /pausing/);
+  startup.resolve(); pause.resolve();
+  await starting;
+  await delay(0);
+  assert.equal(execution.state, "paused");
+  await execution.continue();
+  assert.equal(calls, 1, "old startup cannot nudge the next interval");
+  await execution.stop();
+  await delay(40);
+  assert.equal(execution.state, "stopped");
+  assert.equal(calls, 1);
 });
 
 test("invalid durations and delays fail before execution", () => {

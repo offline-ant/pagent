@@ -10,6 +10,7 @@ import type { AgentDescriptor, AgentEngine, AgentEvent, BrowserKind, BrowserLog,
 import { TOOL_NAMES, toolNames, effectiveTools, type CheckpointPolicy, type ExecutionState } from "./agent-config.ts";
 import { Execution } from "./execution.ts";
 import type { WebBackendState } from "pi-browser/web";
+import type { TurnPrompts } from "./turn-prompts.ts";
 
 export interface PagentSession {
   url: string;
@@ -21,6 +22,8 @@ export interface PagentSession {
   readonly busy: boolean;
   readonly executionState: ExecutionState;
   start(): Promise<void>;
+  /** Operator-only fresh interval after a settled deadline pause. */
+  continue(): Promise<void>;
   stop(): Promise<void>;
   getBackendState(): WebBackendState;
   save(): Promise<string>;
@@ -41,8 +44,11 @@ export interface SessionOptions {
   network?: "open" | "local";
   checkpoint?: CheckpointPolicy;
   durationMs?: number;
+  deadlinePolicy?: "close" | "pause";
   repeatDelayMs?: number;
+  onExecutionState?: (state: ExecutionState) => void;
   onExecutionStart?: () => Promise<void>;
+  onExecutionPause?: () => Promise<void>;
   onExecutionStop?: () => Promise<void>;
   /** Live acknowledgments only, not reconnect replay; must not block delivery/inference. */
   onRecordingEvent?: (record: HostEvent) => void;
@@ -78,27 +84,38 @@ export async function startSession(options: SessionOptions): Promise<PagentSessi
   let accepting = false;
   const cleanupDeadline = new AbortController();
   let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+  const preparedPrompts = new Map<string, { scheduleId: string; epoch: number; prompts: TurnPrompts }>();
   const connection = Promise.withResolvers<void>();
   const firstConnection = connection.promise;
   // Registration can fail before startup reaches its first await of this promise.
   void firstConnection.catch(() => {});
   const execution = new Execution({
-    durationMs: options.durationMs, repeatDelayMs: options.repeatDelayMs,
+    durationMs: options.durationMs, deadlinePolicy: options.deadlinePolicy, repeatDelayMs: options.repeatDelayMs,
     participants: () => agents?.participants ?? [],
-    prompt: async (id, text, scheduleId, current) => {
+    prompt: async (id, scheduleId, current) => {
       await flush();
       if (!current() || stopping || !agents?.idle(id) || !browser) return;
+      const epoch = runtimeEpoch;
+      const prompts = await agents.resolveTurnPrompts(id);
+      if (!current() || stopping || !agents.idle(id) || epoch !== runtimeEpoch || !pageReady) return;
+      preparedPrompts.set(id, { scheduleId, epoch, prompts });
       const result = await browser.evaluateValue(`(() => {
         const agent = document.getElementById(${JSON.stringify(id)});
         if (!agent || !agent.canSubmit) return false;
-        agent.prompt(${JSON.stringify(text)}, ${JSON.stringify(scheduleId)});
+        agent.prompt(${JSON.stringify(prompts.user.text)}, ${JSON.stringify(scheduleId)});
         return true;
       })()`);
       if (current() && result !== true) throw new Error("Agent element is absent or unavailable.");
     },
     flush, cancel: async () => { await beforeCleanupDeadline(agents?.cancelAll() ?? Promise.resolve()); },
-    changed: state => { emit({ type: "execution-state", state }); },
+    changed: state => {
+      if (state !== "running") preparedPrompts.clear();
+      emit({ type: "execution-state", state });
+      if (state === "paused") log("Execution paused at its deadline. The browser remains alive; only the host operator can continue or finish.");
+      try { options.onExecutionState?.(state); } catch (error) { log(`Execution observer failed: ${String(error)}`); }
+    },
     onStart: options.onExecutionStart,
+    onPause: options.onExecutionPause,
     onStop: async () => {
       // All terminal paths share this one budget, starting before capture or
       // cancellation. A stalled provider cannot keep the browser/recorder alive.
@@ -137,7 +154,7 @@ export async function startSession(options: SessionOptions): Promise<PagentSessi
       if (record.seq <= lastDelivered) return; // Already consumed by the ordered reconnect drain.
       await browser.deliver(record);
       lastDelivered = Math.max(lastDelivered, record.seq);
-      if (epoch === runtimeEpoch && !closed && !stopping && !reloading && execution.state !== "stopped") {
+      if (epoch === runtimeEpoch && !closed && !stopping && !reloading && execution.state === "running") {
         try { options.onRecordingEvent?.(record); }
         catch (error) { log(`Recording event failed: ${String(error)}`); }
       }
@@ -256,8 +273,9 @@ export async function startSession(options: SessionOptions): Promise<PagentSessi
   async function handle(request: NativeRequest): Promise<void> {
     if (!agents || !browser) throw new Error("Pagent is still starting.");
     if (request.type === "ready") { reconnect(request.after, request.agents); return; }
-    if (request.type === "cancel") { execution.pause(request.agentId); await agents.cancel(request.agentId); return; }
+    if (request.type === "cancel") { preparedPrompts.delete(request.agentId); execution.pause(request.agentId); await agents.cancel(request.agentId); return; }
     if (request.type === "dispose") {
+      preparedPrompts.delete(request.agentId);
       execution.remove(request.agentId);
       await agents.dispose(request.agentId);
       emit({ type: "disposed" }, { agentId: request.agentId });
@@ -270,12 +288,14 @@ export async function startSession(options: SessionOptions): Promise<PagentSessi
     if (request.type === "stop") { await execution.stop(); return; }
     if (stopping) throw new Error("Pagent is shutting down.");
     if (request.type === "submit") {
-      if (request.scheduleId !== undefined && !execution.accept(request.agentId, request.scheduleId)) {
+      const prepared = request.scheduleId === undefined ? undefined : preparedPrompts.get(request.agentId);
+      if (request.scheduleId !== undefined && (!prepared || prepared.scheduleId !== request.scheduleId || prepared.epoch !== runtimeEpoch || !execution.accept(request.agentId, request.scheduleId))) {
         agents.rejectScheduled(request.agentId, request.id, request.runId);
         return;
       }
+      preparedPrompts.delete(request.agentId);
       execution.pause(request.agentId);
-      await agents.submit(request.agentId, request.id, request.runId);
+      await agents.submit(request.agentId, request.id, request.runId, prepared?.prompts);
       return;
     }
     if (execution.state === "stopped") throw new Error("Execution has stopped.");
@@ -365,7 +385,7 @@ export async function startSession(options: SessionOptions): Promise<PagentSessi
         options.onRecordingInvalidated?.();
         runtimeEpoch++; pageReady = false;
         if (checkpoint !== "document") journal.discard();
-        if (execution.state === "running") void execution.stop().catch(error => log(String(error)));
+        if (execution.state !== "armed" && execution.state !== "stopped") void execution.stop().catch(error => log(String(error)));
       },
       onError: error => { log(error.message); },
       onClose: () => {
@@ -377,7 +397,11 @@ export async function startSession(options: SessionOptions): Promise<PagentSessi
     });
     nativeBrowserReference = nativeBrowser;
     browser = {
-      evaluate: (code, settings) => nativeBrowser.evaluate(code, settings),
+      evaluate: (code, settings) => nativeBrowser.evaluate(code, { ...settings,
+        // A deadline pause aborts model requests, not the living page. In-flight
+        // JavaScript can continue; no provider loop or subsequent tool is resumed.
+        preserveOnAbort: () => execution.state === "pausing" || execution.state === "paused",
+      }),
       evaluateValue: expression => nativeBrowser.evaluateValue(expression),
       snapshot: () => nativeBrowser.snapshot(), screenshot: () => nativeBrowser.screenshot(),
       ...(nativeBrowser.captureFrame ? { captureFrame: (settings: { screenshot: boolean }) => nativeBrowser.captureFrame!(settings) } : {}),
@@ -412,7 +436,7 @@ export async function startSession(options: SessionOptions): Promise<PagentSessi
     if (stopping) throw new Error("Workspace tab was closed during startup.");
     return { url: options.url, directory: workspace.directory, stateDirectory: workspace.stateDirectory, browser,
       agents: agents.engines, modelLabel: agents.modelLabel, get busy() { return agents!.busy; },
-      get executionState() { return execution.state; }, start: () => execution.start(), stop: () => execution.stop(),
+      get executionState() { return execution.state; }, start: () => execution.start(), continue: () => execution.continue(), stop: () => execution.stop(),
       getBackendState: () => agents!.getBackendState(), save, flush, close };
   } catch (error) {
     closePromise ??= cleanup(false);

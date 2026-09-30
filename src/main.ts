@@ -3,7 +3,7 @@ import { parseArgs } from "node:util";
 import { startPagent, type PagentApp } from "./app.ts";
 import { detectBrowser } from "./browser-default.ts";
 import { readConfiguration, validateConfiguration } from "./config.ts";
-import { formatBrowserLog } from "./terminal.ts";
+import { formatBrowserLog, installOperatorControls } from "./terminal.ts";
 
 const HELP = `pagent — the browser tab is the agent workspace
 
@@ -22,7 +22,8 @@ An existing document must contain a <p-agent> element.
   --http <methods>                    Page-wide resource methods, e.g. GET
   --network <open|local>              Local blocks ordinary external page access
   --checkpoint <document|private|none> Checkpoint destination (default document)
-  --duration <seconds>                Stop after pagent.start(); does not auto-start
+  --duration <seconds>                Deadline after pagent.start(); does not auto-start
+  --deadline-policy <close|pause>      Close (default), or keep page for host continuation
   --repeat-delay <milliseconds>       Delay between continuous turns (default 1000)
   --record <milliseconds>             Private DOM + PNG samples after pagent.start()
   --viewport <width>x<height>         Fixed browser viewport in CSS pixels
@@ -47,7 +48,7 @@ async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ allowPositionals: true, strict: true, options: {
     config: { type: "string" }, model: { type: "string" }, thinking: { type: "string" }, port: { type: "string" },
     tools: { type: "string" }, http: { type: "string" }, network: { type: "string" }, checkpoint: { type: "string" },
-    duration: { type: "string" }, "repeat-delay": { type: "string" }, record: { type: "string" }, viewport: { type: "string" },
+    duration: { type: "string" }, "deadline-policy": { type: "string" }, "repeat-delay": { type: "string" }, record: { type: "string" }, viewport: { type: "string" },
     headless: { type: "boolean" }, browser: { type: "string" },
     chromium: { type: "string" }, firefox: { type: "string" },
     "no-sandbox": { type: "boolean" }, restore: { type: "string" },
@@ -63,6 +64,7 @@ async function main(): Promise<void> {
     if (values[name] !== undefined) overrides[name] = values[name] === "" ? [] : values[name].split(",").map(item => item.trim());
   }
   if (values.duration !== undefined) overrides.durationMs = Number(values.duration) * 1000;
+  if (values["deadline-policy"] !== undefined) overrides.deadlinePolicy = values["deadline-policy"];
   if (values["repeat-delay"] !== undefined) overrides.repeatDelayMs = Number(values["repeat-delay"]);
   if (values.record !== undefined) overrides.record = { intervalMs: Number(values.record), screenshots: true };
   if (values.viewport !== undefined) {
@@ -79,11 +81,13 @@ async function main(): Promise<void> {
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("Port must be an integer from 0 through 65535.");
   if (values["no-sandbox"]) console.error("Warning: Chromium's process sandbox is explicitly disabled.");
   let app: PagentApp | undefined;
+  let disposeControls: (() => void) | undefined;
   const startup = new AbortController();
   let stopping = false;
   const stop = () => {
     if (stopping) return;
     stopping = true;
+    disposeControls?.();
     startup.abort(new Error("Startup cancelled."));
     void app?.close().then(() => { process.exitCode = 0; }, error => { console.error(error); process.exitCode = 1; });
   };
@@ -95,14 +99,20 @@ async function main(): Promise<void> {
       executable: browser === "firefox" ? values.firefox : values.chromium,
       noSandbox: values["no-sandbox"], restore: values.restore, resetUI: values["reset-ui"], signal: startup.signal,
       onConsole: entry => { process.stdout.write(formatBrowserLog(entry) + "\n"); },
+      onExecutionState: state => {
+        if (state === "stopped") disposeControls?.();
+        if (state === "paused") console.log("Deadline paused inference; the page remains alive. Type continue or finish in this terminal.");
+      },
     });
   } catch (error) {
+    disposeControls?.();
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
     if (stopping) return;
     throw error;
   }
   if (stopping) { await app.close(); return; }
+  if (config.deadlinePolicy === "pause" && app.executionState !== "stopped") disposeControls = installOperatorControls(app);
   console.log(`Pagent: ${app.url}\nBrowser: ${browser}\nModel: ${app.modelLabel}\nFiles: ${app.directory}\nUse the controlled browser window. Ctrl+C checkpoints (${config.checkpoint ?? "document"}) and stops.`);
 }
 

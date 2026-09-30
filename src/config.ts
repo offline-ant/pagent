@@ -15,12 +15,13 @@ export interface PagentConfiguration {
   network?: "open" | "local";
   checkpoint?: "document" | "private" | "none";
   durationMs?: number;
+  deadlinePolicy?: "close" | "pause";
   repeatDelayMs?: number;
   record?: { intervalMs: number; screenshots?: boolean; events?: RecordingEventKind[] };
   viewport?: { width: number; height: number };
 }
 
-const KEYS = new Set(["model", "thinking", "browser", "headless", "tools", "http", "network", "checkpoint", "durationMs", "repeatDelayMs", "record", "viewport"]);
+const KEYS = new Set(["model", "thinking", "browser", "headless", "tools", "http", "network", "checkpoint", "durationMs", "deadlinePolicy", "repeatDelayMs", "record", "viewport"]);
 const HTTP = new Set(["GET", "HEAD", "POST", "PUT", "DELETE"]);
 
 function object(value: unknown, name: string): Record<string, unknown> {
@@ -75,6 +76,11 @@ export function validateConfiguration(input: unknown): PagentConfiguration {
     result.checkpoint = value.checkpoint as PagentConfiguration["checkpoint"];
   }
   if (value.durationMs !== undefined) result.durationMs = integer(value.durationMs, "durationMs");
+  if (value.deadlinePolicy !== undefined) {
+    if (value.deadlinePolicy !== "close" && value.deadlinePolicy !== "pause") throw new Error("deadlinePolicy must be close or pause.");
+    result.deadlinePolicy = value.deadlinePolicy;
+  }
+  if (result.deadlinePolicy === "pause" && result.durationMs === undefined) throw new Error("deadlinePolicy pause requires durationMs.");
   if (value.repeatDelayMs !== undefined) result.repeatDelayMs = integer(value.repeatDelayMs, "repeatDelayMs", 0);
   if (value.record !== undefined) {
     const record = object(value.record, "record");

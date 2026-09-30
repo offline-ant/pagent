@@ -5,7 +5,7 @@ an ordinary directory. The page owns its editors, conversation records, tool
 display, working memory, and interaction policy. Agents can edit those files and
 the live DOM.
 
-Pagent is a standalone Node **24+** CLI, not a Pi extension. It uses Pi **0.87.0**
+Pagent is a standalone Node **24+** CLI, not a Pi extension. It uses Pi **0.99.1**
 and the bundled `pi-browser` library for Firefox/WebDriver BiDi and Chromium/CDP.
 No sibling checkout or `pi-ant` package is required at runtime.
 
@@ -98,6 +98,7 @@ project/                       The directory passed to pagent; public resource r
     web-backend.json            Persisted research backend override
     research/<sha256-id>/       Per-agent research profiles
     web-snapshots/<sha256-id>/  Per-agent immutable web evidence
+    turn-prompts/<uuid>.json  Resolved per-turn prompt evidence
     revisions/                 HTML checkpoints
     recordings/<id>/           Optional private DOM/PNG timeline and inert viewer
     recovery/                  Explicit recovery backups
@@ -110,9 +111,11 @@ copied only when seeding a missing entry document or explicitly resetting the UI
 
 Programmatic hosts call `startPagent({ directory?: string, ... })`. The returned
 app exposes `directory`, `stateDirectory`, `url`, `browser`, `agents` (a read-only
-map of engines), `modelLabel`, `busy`, `executionState`, `start()`, `stop()`,
-`getBackendState()`, `save()`, `flush()`, and `close()`. `close()` checkpoints
-according to the configured policy and shuts down the host.
+map of engines), `modelLabel`, `busy`, `executionState`, `start()`, `continue()`,
+`stop()`, `getBackendState()`, `save()`, `flush()`, and `close()`. `close()` checkpoints
+according to the configured policy and shuts down the host. The optional
+`onExecutionState(state)` host callback observes execution transitions; it does
+not grant the page access to continuation.
 
 ## Declarative agents and host configuration
 
@@ -121,10 +124,10 @@ Agent settings are ordinary HTML attributes:
 ```html
 <p-agent id="one"
   model="provider/model"
-  system-prompt="./prompt.md"
+  system-prompt-url="./prompt.md"
   tools="console,wait"
   mode="continuous"
-  repeat-prompt="do something"
+  repeat-prompt-raw="do something"
   repeat-delay="1000"
 ></p-agent>
 ```
@@ -132,20 +135,54 @@ Agent settings are ordinary HTML attributes:
 - `model` overrides the workspace default for that identity. Omit it to inherit.
   Pagent does not load ordinary Pi provider extensions; an extension-only model
   being available in Pi does not make it available here.
-- `system-prompt` names a UTF-8 file relative to the resource root. It **replaces**
-  the normal system prompt, rather than appending. Absolute paths, external URLs,
-  traversal, hidden paths, and symlinks are rejected. Files are read by the host,
-  not fetched by page scripts. Omit it for capability-aware stock instructions.
+- System instructions use exactly one of `system-prompt-raw`, `system-prompt-url`,
+  or `system-prompt-el`. They **replace** the normal system prompt, rather than
+  appending. Omit all three for capability-aware stock instructions.
+- Repeated input uses exactly one of `repeat-prompt-raw`, `repeat-prompt-url`, or
+  `repeat-prompt-el`. Omit all three for manual-only input.
+- `-raw` supplies literal text. `-url` names a local UTF-8 file relative to the
+  resource root, read by the host, not fetched by page scripts. Absolute paths,
+  external URLs, traversal, hidden paths, and symlinks are rejected.
+- `-el` is a CSS selector matching **exactly one ordinary light-DOM element**.
+  Its `textContent` supplies the prompt; shadow roots are not traversed. Invalid,
+  missing, or ambiguous selectors fail. All resolved texts must be nonempty and
+  at most **128 KiB UTF-8**. Empty declarations and conflicting sources fail too.
+  The legacy `system-prompt` and `repeat-prompt` attributes are rejected, not aliases.
 - `tools` is a comma-separated subset of the host's allowed tools. An empty value
   selects none. Unknown names and requests exceeding the host ceiling are errors.
-- `mode="continuous"` repeats successful turns using `repeat-prompt`. Omit mode
-  for manual execution. `repeat-delay` is optional nonnegative milliseconds,
+- `mode="continuous"` repeats successful turns using the declared repeat source;
+  it requires one. Omit mode to disable automatic repetition. `repeat-delay` is optional nonnegative milliseconds,
   overriding the host's `repeatDelayMs` (default 1000).
 
-Configuration is pinned while the identity is registered, including temporary
-detachment and pending disposal. Changing these attributes is not a live model
-or permission switch; dispose and await acknowledgment before reconfiguring. Explicit closing tags are required;
-HTML custom elements are not self-closing.
+Configuration, including prompt **source definitions**, is pinned while the
+identity is registered, including temporary detachment and pending disposal.
+Changing these attributes is not a live model or permission switch; dispose and
+await acknowledgment before reconfiguring. Referenced file/element **contents**
+are deliberately live: each new turn resolves its instructions once, and tool
+rounds keep that snapshot unchanged. Edits affect later turns, including fresh
+turns after operator continuation, not a turn already running. Manual `.prompt()`
+and `.submit()` resolve the system source but use their submitted input instead
+of the repeat source. Explicit closing tags are required; HTML custom elements
+are not self-closing.
+
+For shared editable instructions:
+
+```html
+<pre id="instructions" contenteditable="true">Your environment is this page.</pre>
+<p id="task" contenteditable="true">Inspect the page.</p>
+<p-agent id="one" system-prompt-el="#instructions" repeat-prompt-el="#task"></p-agent>
+```
+
+Each accepted turn records the actual resolved prompts before inference. A scoped
+`turn-prompts` event carries `{resolvedAt, system:{source,text}, user:{source,text}}`;
+`resolvedAt` is an ISO timestamp, and sources are `{kind:"raw"|"url"|"el",value}`.
+The system source is `null` for stock instructions; manual input has a `raw`
+source. The stock UI stores this as the matching `agent-output.state.prompts` in
+serializable shadow state, not public prose or an extra model-history message.
+The host also atomically writes `.pagent/turn-prompts/<uuid>.json` containing
+`{agentId,inputId,runId,prompts}` under **every checkpoint policy**, including
+`none`. These prompt-only records are analysis evidence: they never replay a
+conversation or restart inference. HTML durability still follows checkpoint policy.
 
 HTTP and network policy are **page-wide**, because every agent shares the same
 JavaScript environment. There is intentionally no per-agent `http` attribute
@@ -178,7 +215,8 @@ The same keys are `startPagent` options. JSON also accepts `model`, `thinking`,
 and `headless`. Unknown keys and malformed values are rejected before workspace
 startup; no config file is discovered automatically. CLI flags override JSON.
 `--duration` uses seconds; JSON duration and repetition/recording intervals use
-milliseconds. `--record` enables DOM and PNG recording; JSON can set
+milliseconds. Optional `deadlinePolicy:"close"|"pause"` (CLI
+`--deadline-policy close|pause`) defaults to `close`. `pause` requires `durationMs`. `--record` enables DOM and PNG recording; JSON can set
 `screenshots:false` and opt into completion triggers through `events` (see below).
 Viewport dimensions are CSS pixels from 1 through 8192.
 
@@ -200,7 +238,7 @@ old runtime events on reload. Document mode retains its durable crash-recovery o
 ### Starting and repeating
 
 `pagent.start()` in the page (or `app.start()` in the host) explicitly starts the
-execution. It captures the participating agents with `repeat-prompt`, starts the
+execution. It captures the participating agents with a repeat prompt source, starts the
 optional duration clock and recorder, and prompts them concurrently. Calling it
 again nudges idle participants; busy agents do not accumulate prompts.
 `pagent.nudge()` nudges an already-running execution without starting one. Ordinary
@@ -214,14 +252,57 @@ fields. Removed participants are retired, and newly attached agents are not
 silently enrolled in an already-running execution. Context exhaustion is an
 explicit error, not an automatic history reset.
 
-`pagent.stop()` / `app.stop()` stops admission and repetition. The deadline and
-host closure use the same terminal path: stop periodic recording, attempt a
-bounded final capture of the live page, then cancel work without browser recovery.
+`pagent.stop()` / `app.stop()` stops admission and repetition. By default, the
+deadline and host closure use the same terminal path: stop periodic recording,
+attempt a bounded final capture of the live page, then cancel work without browser recovery.
 A six-second cleanup budget starts immediately, even without a configured duration;
 if cancellation stalls, Pagent closes the owned browser and ends cleanup rather
 than waiting indefinitely. Closing the browser ends page animations too. The page can alter its
 own controls but not extend the host deadline. Starting after a stopped execution
 requires a new host; reloads do not automatically resume repetition.
+
+### Pausing at the deadline and continuing
+
+For an explicit operator decision after each interval:
+
+```sh
+pagent ./piece --duration 600 --deadline-policy pause
+```
+
+Or set `{"durationMs":600000,"deadlinePolicy":"pause"}` in explicit JSON config
+or `startPagent` options. At the deadline, admission and repetition stop immediately,
+active requests are cancelled, and execution moves through `pausing` to `paused`
+while retaining the owned browser. DOM, JavaScript state and listeners remain in
+the live page. A running console evaluation is detached, not terminated: its
+already-started JavaScript, timers, and animations can still run or mutate the
+page during a pause and later intervals. This is **not** a frozen world or a
+suspended provider request.
+
+Only after `paused`, the host's `await app.continue()` starts another interval of
+the configured duration and fresh turns for surviving original participants,
+using retained completed history and new run IDs. It does not replay interrupted
+tools or resume an old model request. No automatic continuation occurs. Failed
+pause settlement is not permission to restart inference: failure or a six-second
+settlement timeout terminally closes the host instead. Repeated continuation
+is explicit each time. Closing the browser loses this live continuation option;
+saved HTML is not an equivalent reconstruction of its JavaScript heap.
+
+The CLI installs line-based operator commands for pause policy: type `continue`
+and Enter to request another interval, or `finish` and Enter to close the host.
+Commands are in the **host terminal**, not the page. `continue` reports an error
+unless the execution is paused; it cannot extend a still-running interval.
+`finish`, Ctrl+C, SIGTERM, `app.stop()` and `app.close()` remain terminal.
+The page's start/nudge/submit requests cannot resume a paused execution, and there
+is no native `continue` request or page API that grants more time.
+
+Custom hosts can reuse `installOperatorControls(app, {input?, output?})` from
+`src/terminal.ts` (compiled: `dist/terminal.js`). Streams default to `process.stdin`
+and `process.stdout`; the helper returns an idempotent disposer. It accepts an
+object with async `continue()` and `close()` methods. Install only when wanted,
+and dispose on `onExecutionState("stopped")`, shutdown or startup failure. Input
+EOF removes the controls but does not implicitly finish the experiment. Continuation
+errors are printed and do not queue retries; `finish` is not held behind a pending
+continuation. This helper is not exposed to page scripts.
 
 ### Private recording and playback
 
@@ -234,6 +315,11 @@ Each archive contains `manifest.jsonl`, `frames/`, and an inert `viewer.html`.
 Open the viewer in an ordinary browser and select the recording folder to scrub
 or play its screenshots. It does not execute archived HTML. The manifest records
 planned and actual capture times, missed samples, errors, and the final capture.
+A deadline pause finishes that interval's archive and stops sampling while paused.
+Each operator continuation creates a new archive with its own baseline and a
+`previous` archive-directory name in the manifest's `start` record. Earlier
+archives are not rewritten. Final capture may overlap request cancellation;
+recordings are evidence, not resumable provider checkpoints.
 
 Optional `record.events` selects additional captures after acknowledged page delivery:
 - `"tool"`: tool execution ended, including error results.
@@ -333,8 +419,9 @@ normally, without retries or deleting artwork. Fresh unregistered same-ID
 `p-agent` replacements are rejected/removed in favor of the original, including
 when `body.innerHTML = body.innerHTML` reparses the page.
 
-Page stop requests suppress recovery immediately; host stop/deadline and reload
-state events, and page teardown, also suppress it. Recovery never restarts stopped
+Page stop requests suppress recovery immediately; terminal host stop/deadline and
+reload state events, and page teardown, also suppress it. A nonterminal deadline
+pause retains ordinary element recovery without starting inference. Recovery never restarts stopped
 execution or changes host deadlines. This handles accidental subtree removal,
 not hostile scripts, cleared agent internals, rewritten bridges/prototypes,
 navigation, or repeated removal loops. It preserves existence, not visibility or
@@ -376,8 +463,10 @@ time out after 30 seconds.
 
 Ordinary per-agent cancellation of a running Firefox evaluation restarts the
 workspace browser and restores saved HTML. **Every agent loses unsaved DOM/runtime
-state.** Terminal stop, deadline, and host shutdown disable this recovery before
-final capture; they never restart an original document as a final recorded frame. Cancelling
+state.** A configured deadline pause instead detaches a running evaluation without
+resetting the page; its JavaScript may continue. Terminal stop, default deadline,
+and host shutdown disable recovery before final capture; they never restart an
+original document as a final recorded frame. Cancelling
 inference when no evaluation is running does not restart it. A hung internal
 context collector or event receiver stops Firefox without automatic relaunch;
 repair the files and recover explicitly. Research-browser failures do not reset
@@ -618,17 +707,19 @@ aos.send({type: 'backend-set', override: 'browser'}); // auto | codex | browser 
 ```
 
 Ready/register agent descriptors carry `agentId` and optional `model`,
-`systemPrompt` (local resource path), `tools` (array), `mode`, `repeatPrompt`, and
-`repeatDelayMs`. Stock elements expose their pinned descriptor as `.configuration`.
+`systemPromptSource`, `tools` (array), `mode`, `repeatPromptSource`, and
+`repeatDelayMs`. Both prompt-source fields use `{kind:"raw"|"url"|"el",value:string}`;
+legacy `systemPrompt` and `repeatPrompt` fields are rejected. Stock elements expose
+their pinned descriptor as `.configuration`.
 Ready requests use descriptors, not bare ID strings; custom UIs must send this
 protocol and existing project-owned stock modules must be updated explicitly.
 
-Events are `message`, `tool`, `status`, `run`, `connected`, `workspace-state`,
+Events are `message`, `tool`, `turn-prompts`, `status`, `run`, `connected`, `workspace-state`,
 `execution-state`, `disposed`, `saved`, `error`, `web-attention`, `web-progress`,
 and `backend-state`. Only a matching terminal `run` receipt completes a run,
 not SDK idle. `connected` provides URL/model/busy/current run/effective tools;
 `workspace-state` reports aggregate `busy` and `reloading`. `execution-state`
-reports `armed`, `running`, or `stopped`. `disposed` releases an ID. Backend state reports `configured`,
+reports `armed`, `running`, `pausing`, `paused`, or `stopped`. `disposed` releases an ID. Backend state reports `configured`,
 `override`, `effective`, and `source`; reconnect publishes authoritative state.
 A `message` update may carry `thinkingEnd` with the SDK's completed reasoning-block
 index; normal rendering still uses its message snapshot. See `src/protocol.ts` for
@@ -718,8 +809,8 @@ and updates Pagent's local dependency and lockfile. It does not publish anything
 Run focused checks, not the full suite. Browser-heavy files run serially:
 
 ```sh
-node --test test/config.test.ts test/recording.test.ts test/agent-config.test.ts test/execution.test.ts
-node --test --test-concurrency=1 test/configured-agents.test.ts test/execution-shutdown.test.ts test/recording-events.test.ts test/server-policy.test.ts test/browser-policy.test.ts
+node --test test/config.test.ts test/terminal.test.ts test/recording.test.ts test/agent-config.test.ts test/execution.test.ts
+node --test --test-concurrency=1 test/configured-agents.test.ts test/execution-pause.test.ts test/execution-shutdown.test.ts test/recording-events.test.ts test/server-policy.test.ts test/browser-policy.test.ts
 node --test --test-concurrency=1 test/storage.test.ts test/server.test.ts test/recovery.test.ts
 node --test --test-concurrency=1 test/browser-default.test.ts test/engine-model.test.ts test/cli.test.ts test/packaging.test.ts
 node --test --test-concurrency=1 test/e2e.test.ts test/lifecycle.test.ts test/workspace-lifecycle.test.ts

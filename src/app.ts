@@ -9,6 +9,7 @@ import { startServer, type ResourceServer } from "./server.ts";
 import { startSession, type PagentSession } from "./session.ts";
 import { openWorkspace } from "./storage.ts";
 import type { BrowserLog, PageBrowser } from "./protocol.ts";
+import type { ExecutionState } from "./agent-config.ts";
 
 export type { PagentSession } from "./session.ts";
 
@@ -23,6 +24,7 @@ export interface PagentOptions extends PagentConfiguration {
   resetUI?: boolean;
   log?: (message: string) => void;
   onConsole?: (entry: BrowserLog) => void;
+  onExecutionState?: (state: ExecutionState) => void;
   signal?: AbortSignal;
 }
 
@@ -34,7 +36,7 @@ export async function startPagent(options: PagentOptions = {}): Promise<PagentAp
   const config = validateConfiguration({
     model: options.model, thinking: options.thinking, browser: options.browser, headless: options.headless,
     tools: options.tools, http: options.http, network: options.network, checkpoint: options.checkpoint,
-    durationMs: options.durationMs, repeatDelayMs: options.repeatDelayMs, record: options.record, viewport: options.viewport,
+    durationMs: options.durationMs, deadlinePolicy: options.deadlinePolicy, repeatDelayMs: options.repeatDelayMs, record: options.record, viewport: options.viewport,
   });
   const templateDir = fileURLToPath(new URL("../template/", import.meta.url));
   options.signal?.throwIfAborted();
@@ -70,11 +72,19 @@ export async function startPagent(options: PagentOptions = {}): Promise<PagentAp
     session = await startSession({
       workspace, url: server.url, browserKind, model: config.model, thinking: config.thinking,
       tools: config.tools, http: config.http, network: config.network, checkpoint: config.checkpoint,
-      durationMs: config.durationMs, repeatDelayMs: config.repeatDelayMs,
+      durationMs: config.durationMs, deadlinePolicy: config.deadlinePolicy, repeatDelayMs: config.repeatDelayMs,
+      onExecutionState: options.onExecutionState,
       fake: options.fake, signal, webHeadless: config.headless, log, onConsole: options.onConsole,
       onExecutionStart: async () => {
-        if (recorder) { await recorder.start(); log(`Recording: ${recorder.directory}`); }
+        if (config.record && browser) {
+          const previous = recorder?.directory;
+          recorder = new DomRecorder({ ...config.record, stateDirectory: workspace.stateDirectory, browser, log,
+            ...(previous ? { previous: path.basename(previous) } : {}) });
+          await recorder.start();
+          log(`Recording: ${recorder.directory}`);
+        }
       },
+      onExecutionPause: async () => { await recorder?.stop(); },
       onRecordingEvent: record => recorder?.observe(record),
       onRecordingInvalidated: () => recorder?.disableEvents(),
       onExecutionStop: async () => {
@@ -86,7 +96,6 @@ export async function startPagent(options: PagentOptions = {}): Promise<PagentAp
         browser = await launchBrowser({ ...tabOptions, browser: browserKind, network: config.network, viewport: config.viewport,
           profileDir: path.join(workspace.stateDirectory, browserKind), headless: config.headless ?? false,
           executable: options.executable, noSandbox: options.noSandbox });
-        if (config.record) recorder = new DomRecorder({ ...config.record, stateDirectory: workspace.stateDirectory, browser, log });
         return browser;
       },
       onClose: () => { void close().catch(error => log(String(error))); },

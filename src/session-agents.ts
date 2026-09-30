@@ -6,6 +6,8 @@ import type { EngineFactory } from "./agent.ts";
 import { MAX_AGENTS, Runs, terminal, validateAgentId } from "./runs.ts";
 import { WebAttentionCoordinator } from "./web-tools.ts";
 import { readWebBackendOverride, writeWebBackendOverride } from "./web-backend.ts";
+import { buildSystemPrompt } from "./prompt.ts";
+import { resolvePrompt, recordTurnPrompts, type TurnPrompts } from "./turn-prompts.ts";
 import type { AgentEngine, AgentEvent, AgentRun, BrowserKind, HostEvent, PageBrowser, PageContext } from "./protocol.ts";
 import { agentConfiguration, effectiveTools, TOOL_NAMES, type AgentConfiguration, type ToolName, type CheckpointPolicy } from "./agent-config.ts";
 
@@ -104,16 +106,9 @@ export class SessionAgents {
       attention: new WebAttentionCoordinator(event => this.emit(entry, event)) };
     this.entries.set(id, entry);
     void (async () => {
-      let systemPrompt: string | undefined;
-      if (configuration.systemPrompt !== undefined) {
-        if (!this.options.readResource) throw new Error("This host cannot load system-prompt resources.");
-        const bytes = await this.options.readResource(configuration.systemPrompt);
-        if (bytes.length > 128 * 1024) throw new Error("System prompt exceeds 128 KiB.");
-        systemPrompt = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      }
       return this.options.factory.create({
       cwd: this.options.directory, agentId: id, browserKind: this.options.browserKind, browser: this.options.browser,
-      model: configuration.model, systemPrompt, tools, http: this.options.http, network: this.options.network,
+      model: configuration.model, tools, http: this.options.http, network: this.options.network,
       checkpoint: this.options.checkpoint, blocked: this.options.blocked,
       diagnostics: this.options.diagnostics, readContext: () => this.options.readContext(id), save: this.options.save,
       webProfileDir: join(this.options.stateDirectory, "research", createHash("sha256").update(id).digest("hex")),
@@ -171,7 +166,20 @@ export class SessionAgents {
       ...(entry.run && event.type !== "backend-state" ? { requestId: entry.run.inputId, runId: entry.run.id } : {}) } }));
   }
 
-  submit(agentId: string, inputId: string, runId: string): Promise<void> {
+  async resolveTurnPrompts(agentId: string, manualText?: string): Promise<TurnPrompts> {
+    const entry = this.entries.get(agentId);
+    if (!entry || entry.closing) throw new Error(`Agent ${agentId} is not registered.`);
+    const { configuration } = entry;
+    const system = configuration.systemPromptSource
+      ? await resolvePrompt(configuration.systemPromptSource, this.options.browser, this.options.readResource)
+      : { source: null, text: buildSystemPrompt(this.options.browserKind, { ...this.options, tools: entry.tools }) };
+    const source = manualText === undefined ? configuration.repeatPromptSource : { kind: "raw" as const, value: manualText };
+    if (!source) throw new Error("Agent has no repeat prompt source.");
+    const user = await resolvePrompt(source, this.options.browser, this.options.readResource);
+    return { resolvedAt: new Date().toISOString(), system, user };
+  }
+
+  submit(agentId: string, inputId: string, runId: string, prepared?: TurnPrompts): Promise<void> {
     let entry: AgentEntry;
     let run: AgentRun;
     try {
@@ -204,10 +212,16 @@ export class SessionAgents {
         const context = await this.options.readContext(agentId, inputId);
         abort.signal.throwIfAborted();
         if (!context.prompt?.trim()) throw new Error("collectContext(agentId, inputId) returned an empty prompt.");
-        await this.options.save(); // Persist accepted input/branch before spending inference tokens.
+        const prompts = prepared ?? await this.resolveTurnPrompts(agentId, context.prompt);
+        abort.signal.throwIfAborted();
+        if (prompts.user.text !== context.prompt) throw new Error("Scheduled prompt changed before submission; refusing a different instruction.");
+        await recordTurnPrompts(this.options.stateDirectory, { agentId, inputId, runId }, prompts);
+        abort.signal.throwIfAborted();
+        this.emit(entry, { type: "turn-prompts", prompts });
+        await this.options.save(); // Persist accepted input/branch and prompt evidence before inference.
         abort.signal.throwIfAborted();
         if (this.options.blocked()) throw new Error("Execution has stopped.");
-        status = await engine.submit({ id: runId, prompt: context.prompt, history: context.history });
+        status = await engine.submit({ id: runId, prompt: prompts.user.text, systemPrompt: prompts.system.text, history: context.history });
         if (abort.signal.aborted) status = "cancelled";
       } catch (error) {
         status = abort.signal.aborted ? "cancelled" : "error";

@@ -44,6 +44,8 @@ const MAX_COMPLETIONS = 32;
 
 interface RecorderOptions {
   stateDirectory: string;
+  /** Previous completed interval archive in this workspace, never replayed. */
+  previous?: string;
   browser: Pick<PageBrowser, "captureFrame">;
   intervalMs: number;
   screenshots?: boolean;
@@ -142,7 +144,7 @@ export class DomRecorder {
     await writeFile(path.join(this.directory, "viewer.html"), RECORDING_VIEWER, { mode: 0o600 });
     this.origin = this.clock.now();
     if (this.state !== "stopping") this.state = "running";
-    await this.record({ type: "start", version: 1, intervalMs: this.options.intervalMs, screenshots: this.options.screenshots ?? false, events: [...this.events] });
+    await this.record({ type: "start", version: 1, intervalMs: this.options.intervalMs, screenshots: this.options.screenshots ?? false, events: [...this.events], ...(this.options.previous ? { previous: this.options.previous } : {}) });
     const baseline = this.capture(0, "baseline");
     this.schedule(1);
     if (!await this.within(baseline, CAPTURE_BUDGET_MS)) {

@@ -24,7 +24,7 @@ test("explicit host configuration validates and copies values", () => {
   const input = {
     model: "provider/model", thinking: "high", browser: "chromium", headless: true,
     tools: ["console", "wait"], http: ["GET"], network: "local", checkpoint: "private",
-    durationMs: 600_000, repeatDelayMs: 0, record: { intervalMs: 30_000, screenshots: true, events: ["tool", "thinking", "message"] },
+    durationMs: 600_000, deadlinePolicy: "pause", repeatDelayMs: 0, record: { intervalMs: 30_000, screenshots: true, events: ["tool", "thinking", "message"] },
     viewport: { width: 1280, height: 900 },
   };
   const actual = validateConfiguration(input);
@@ -36,6 +36,8 @@ test("explicit host configuration validates and copies values", () => {
   assert.deepEqual(validateConfiguration({ record: { intervalMs: 30_000, events: [] } }).record, { intervalMs: 30_000, events: [] });
   assert.deepEqual(validateConfiguration({ record: { intervalMs: 30_000 } }).record, { intervalMs: 30_000 });
   assert.deepEqual(validateConfiguration({ tools: [], http: [], checkpoint: "none" }), { tools: [], http: [], checkpoint: "none" });
+  assert.deepEqual(validateConfiguration({}), {}, "omitted deadline policy retains the default close behavior");
+  assert.deepEqual(validateConfiguration({ deadlinePolicy: "close" }), { deadlinePolicy: "close" });
 });
 
 test("host configuration rejects unknown settings and invalid limits", () => {
@@ -44,6 +46,7 @@ test("host configuration rejects unknown settings and invalid limits", () => {
     { http: ["TRACE"] }, { http: ["GET", "GET"] }, { http: "GET" },
     { network: "localhost" }, { checkpoint: "off" }, { headless: "true" },
     { browser: "safari" }, { model: "" }, { durationMs: 0 }, { durationMs: Infinity },
+    { deadlinePolicy: "wait", durationMs: 1000 }, { deadlinePolicy: "pause" }, { deadlinePolicy: null },
     { repeatDelayMs: -1 }, { record: {} }, { record: { intervalMs: 0 } },
     { record: { intervalMs: 500, events: "tool" } }, { record: { intervalMs: 500, events: ["token"] } },
     { record: { intervalMs: 500, events: ["tool", "tool"] } }, { record: { intervalMs: 500, events: null } },
@@ -75,6 +78,8 @@ test("CLI capability flags fail before workspace creation; explicit flags overri
       [["--tools", "bash"], /Tools must/],
       [["--http", "GET,TRACE"], /http must/],
       [["--duration=-1"], /durationMs must/],
+      [["--deadline-policy", "wait"], /deadlinePolicy must/],
+      [["--deadline-policy", "pause"], /pause requires durationMs/],
       [["--repeat-delay=-1"], /repeatDelayMs must/],
       [["--record", "0"], /record.intervalMs must/],
       [["--viewport", "banana"], /Viewport must/],
@@ -85,6 +90,9 @@ test("CLI capability flags fail before workspace creation; explicit flags overri
       assert.equal(run.code, 1, run.output);
       assert.match(run.output, expected);
     }
+    const paused = await cli([directory, "--config", filename, "--deadline-policy", "pause", "--chromium", "/wrong"]);
+    assert.equal(paused.code, 1);
+    assert.match(paused.output, /Chromium-only/, "pause is accepted with JSON duration before unrelated browser validation");
     const overridden = await cli([directory, "--config", filename, "--browser", "chromium", "--firefox", "/wrong"]);
     assert.equal(overridden.code, 1);
     assert.match(overridden.output, /Use --browser firefox/);

@@ -1,6 +1,8 @@
 import type { WebAttention, WebBackend, WebBackendState } from "pi-browser/web";
 import type { AgentConfiguration, ExecutionState, ToolName, CheckpointPolicy } from "./agent-config.ts";
 
+import type { TurnPrompts } from "./turn-prompts.ts";
+
 export interface AgentDescriptor extends AgentConfiguration { agentId: string }
 
 export interface AgentRun {
@@ -14,6 +16,7 @@ export interface AgentRun {
 
 /** Browser-owned protocol. Host records carry sequence numbers for reconnect/deduplication. */
 export type AgentEvent =
+  | { type: "turn-prompts"; prompts: TurnPrompts }
   | { type: "message"; phase: "start" | "update" | "end"; message: unknown; thinkingEnd?: number }
   | { type: "tool"; phase: "start" | "update" | "end"; callId: string; name: string; args?: unknown; result?: unknown; isError?: boolean }
   | { type: "status"; status: "running" | "idle"; model?: string }
@@ -59,6 +62,7 @@ export interface PageContext {
 
 export interface Submission {
   id: string;
+  systemPrompt?: string;
   prompt: string;
   history: unknown[];
 }
@@ -109,7 +113,7 @@ export interface BrowserOptions extends BrowserPageOptions {
 }
 
 export interface PageBrowser {
-  evaluate(code: string, options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<EvaluationResult>;
+  evaluate(code: string, options?: { signal?: AbortSignal; timeoutMs?: number; preserveOnAbort?: () => boolean }): Promise<EvaluationResult>;
   evaluateValue(expression: string): Promise<unknown>;
   snapshot(): Promise<string>;
   reload(): Promise<void>;
@@ -140,7 +144,6 @@ export interface EngineOptions {
   model?: string;
   thinking?: string;
   fake?: boolean;
-  systemPrompt?: string;
   tools?: ToolName[];
   http?: string[];
   network?: "open" | "local";

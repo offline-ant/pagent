@@ -45,7 +45,7 @@ async function fixture(browserKind: BrowserKind, html: string, settings: Partial
 }
 
 test("a cancelled scheduled prompt queued in the browser cannot reach inference", { timeout: 30_000 }, async () => {
-  const value = await fixture("chromium", '<p-agent id="one" mode="continuous" repeat-prompt="/fake-say again"></p-agent>', {
+  const value = await fixture("chromium", '<p-agent id="one" mode="continuous" repeat-prompt-raw="/fake-say again"></p-agent>', {
     checkpoint: "none", tools: [], repeatDelayMs: 20,
   });
   const { session } = value;
@@ -91,7 +91,7 @@ test("a cancelled scheduled prompt queued in the browser cannot reach inference"
 
 for (const browser of ["chromium", "firefox"] as const) {
   test(`${browser} configured prompt/tool selection is exact, immutable while attached, and preserves original source`, { timeout: 45_000 }, async () => {
-    const fixtureValue = await fixture(browser, '<p-agent id="one" system-prompt="./prompt.md" tools="console"></p-agent><p-agent id="two" tools=""></p-agent>', { tools: ["console", "wait"], network: "local", http: ["GET", "HEAD"] });
+    const fixtureValue = await fixture(browser, '<p-agent id="one" system-prompt-url="./prompt.md" tools="console"></p-agent><p-agent id="two" tools=""></p-agent>', { tools: ["console", "wait"], network: "local", http: ["GET", "HEAD"] });
     const { session, workspace, original } = fixtureValue;
     try {
       await session.browser.evaluateValue(`$('#one').prompt('/fake-inspect')`);
@@ -100,8 +100,8 @@ for (const browser of ["chromium", "firefox"] as const) {
       assert.equal(inspected.systemPrompt, "Exact operator instructions.\nOnly this prompt.");
       assert.deepEqual(inspected.tools.map(tool => tool.name), ["console"]);
       assert.equal(await session.browser.evaluateValue(`$('#one').shadowRoot.querySelector('[data-save]').hidden`), true);
-      await session.browser.evaluateValue(`$('#one').setAttribute('system-prompt', 'other.md')`);
-      assert.equal(await session.browser.evaluateValue(`$('#one').getAttribute('system-prompt')`), "./prompt.md");
+      await session.browser.evaluateValue(`$('#one').setAttribute('system-prompt-url', 'other.md')`);
+      assert.equal(await session.browser.evaluateValue(`$('#one').getAttribute('system-prompt-url')`), "./prompt.md");
       assert.match(String(await session.browser.evaluateValue(`$('#one').state.notice`)), /pinned/);
       await session.browser.evaluateValue(`$('#two').prompt('/fake-inspect')`);
       await until(async () => await session.browser.evaluateValue(`$('#two').run?.status === 'complete'`) === true);
@@ -115,7 +115,9 @@ for (const browser of ["chromium", "firefox"] as const) {
       await session.save();
       assert.deepEqual(await workspace.read("/"), original);
       await symlink(join(workspace.directory, "prompt.md"), join(workspace.directory, "linked.md"));
-      await session.browser.evaluateValue(`(() => { const a=document.createElement('p-agent'); a.id='linked'; a.setAttribute('system-prompt','./linked.md'); document.body.append(a); })()`);
+      await session.browser.evaluateValue(`(() => { const a=document.createElement('p-agent'); a.id='linked'; a.setAttribute('system-prompt-url','./linked.md'); document.body.append(a); })()`);
+      await until(async () => await session.browser.evaluateValue(`$('#linked').canSubmit`) === true);
+      await session.browser.evaluateValue(`$('#linked').prompt('/fake-inspect')`);
       await until(async () => String(await session.browser.evaluateValue(`$('#linked').state.notice`)).includes("Resource must be a regular file"));
     } finally { await fixtureValue.close(); }
   });
@@ -123,7 +125,7 @@ for (const browser of ["chromium", "firefox"] as const) {
   test(`${browser} continuous kickoff repeats settled runs and deadline rejects every native submission path`, { timeout: 45_000 }, async () => {
     let starts = 0;
     let stops = 0;
-    const fixtureValue = await fixture(browser, '<p-agent id="one" mode="continuous" repeat-prompt="/fake-say one"></p-agent><p-agent id="two" mode="continuous" repeat-prompt="/fake-say two"></p-agent>', {
+    const fixtureValue = await fixture(browser, '<p-agent id="one" mode="continuous" repeat-prompt-raw="/fake-say one"></p-agent><p-agent id="two" mode="continuous" repeat-prompt-raw="/fake-say two"></p-agent>', {
       durationMs: browser === "firefox" ? 4000 : 1000, repeatDelayMs: 60, checkpoint: "none", tools: ["console"],
       onExecutionStart: async () => { starts++; }, onExecutionStop: async () => { stops++; },
     });

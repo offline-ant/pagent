@@ -29,6 +29,11 @@ function inspect(context: TranscriptContext): string {
   });
 }
 
+/** Prompt tests need the effective instructions, not recursively embedded prior inspection answers. */
+function inspectSystemPrompt(context: TranscriptContext): string {
+  return JSON.stringify({ systemPrompt: getCurrentSystemPrompt(context.messages) });
+}
+
 export function prepareFakeResponse(fake: FauxProviderHandle, prompt: string): void {
   if (prompt === "/fake-wait") {
     fake.setResponses([async (_context, options) => {
@@ -37,8 +42,8 @@ export function prepareFakeResponse(fake: FauxProviderHandle, prompt: string): v
     }]);
     return;
   }
-  if (prompt === "/fake-inspect") {
-    fake.setResponses([context => fauxAssistantMessage(inspect(context))]);
+  if (prompt === "/fake-inspect" || prompt === "/fake-system-prompt") {
+    fake.setResponses([context => fauxAssistantMessage(prompt === "/fake-inspect" ? inspect(context) : inspectSystemPrompt(context))]);
     return;
   }
   if (prompt.startsWith("/fake-think ")) {
@@ -52,13 +57,14 @@ export function prepareFakeResponse(fake: FauxProviderHandle, prompt: string): v
     fake.setResponses([fauxAssistantMessage(prompt.slice("/fake-say ".length))]);
     return;
   }
-  if (prompt.startsWith("/fake-console ") || prompt.startsWith("/fake-join ")) {
-    const consoleCall = prompt.startsWith("/fake-console ");
+  if (prompt.startsWith("/fake-console ") || prompt.startsWith("/fake-console-system-prompt ") || prompt.startsWith("/fake-join ")) {
+    const inspecting = prompt.startsWith("/fake-console-system-prompt ");
+    const consoleCall = inspecting || prompt.startsWith("/fake-console ");
     const command = consoleCall ? "console" : "wait";
-    const argument = prompt.slice(consoleCall ? "/fake-console ".length : "/fake-join ".length);
+    const argument = prompt.slice(inspecting ? "/fake-console-system-prompt ".length : consoleCall ? "/fake-console ".length : "/fake-join ".length);
     fake.setResponses([
       fauxAssistantMessage(fauxToolCall(command, consoleCall ? { code: argument } : { runs: argument.split(",").map(id => id.trim()) }), { stopReason: "toolUse" }),
-      context => fauxAssistantMessage(JSON.stringify(context.messages.findLast(message => message.role === "toolResult"))),
+      context => fauxAssistantMessage(inspecting ? inspectSystemPrompt(context) : JSON.stringify(context.messages.findLast(message => message.role === "toolResult"))),
     ]);
     return;
   }

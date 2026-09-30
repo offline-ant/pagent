@@ -4,10 +4,14 @@ import { installControls, refreshControls } from "./agent-controls.js";
 
 const messageText = message => typeof message?.content === "string" ? message.content : (message?.content ?? []).filter(part => part.type === "text").map(part => part.text).join("\n");
 const terminal = run => run && ["complete", "cancelled", "error"].includes(run.status);
+const promptKinds = ["raw", "url", "el"];
+const promptAttributes = ["system-prompt", "repeat-prompt"];
+const legacyPromptMessage = name => `${name} is no longer supported; use exactly one of ${promptKinds.map(kind => `${name}-${kind}`).join(", ")}.`;
 
 /** One ordinary page element owns one conversation and independent inference. */
 export class PAgent extends HTMLElement {
-  static observedAttributes = ["id", "model", "system-prompt", "tools", "mode", "repeat-prompt", "repeat-delay", "persist-start", "persist-end", "public-html"];
+  static observedAttributes = ["id", "model", "tools", "mode", "repeat-delay", "persist-start", "persist-end", "public-html",
+    ...promptAttributes.flatMap(name => [name, ...promptKinds.map(kind => `${name}-${kind}`)])];
 
   connectedCallback() {
     // An authoritative ancestor may already have rejected this parsed subtree.
@@ -54,13 +58,25 @@ export class PAgent extends HTMLElement {
     this.restoringAttribute = true;
     if (previous === null) this.removeAttribute(name); else this.setAttribute(name, previous);
     this.restoringAttribute = false;
-    this.notice(name === "id" ? "An attached agent cannot be renamed; create a new p-agent instead." : "Agent configuration is pinned while registered; dispose it and wait for acknowledgment before changing settings.", true);
+    this.notice(promptAttributes.includes(name) ? legacyPromptMessage(name) : name === "id" ? "An attached agent cannot be renamed; create a new p-agent instead." : "Agent configuration is pinned while registered; dispose it and wait for acknowledgment before changing settings.", true);
   }
 
   get configuration() {
     const configuration = { agentId: this.id };
-    for (const [attribute, key] of [["model", "model"], ["system-prompt", "systemPrompt"], ["mode", "mode"], ["repeat-prompt", "repeatPrompt"]]) {
+    for (const [attribute, key] of [["model", "model"], ["mode", "mode"]]) {
       if (this.hasAttribute(attribute)) configuration[key] = this.getAttribute(attribute);
+    }
+    for (const [attribute, key] of [["system-prompt", "systemPromptSource"], ["repeat-prompt", "repeatPromptSource"]]) {
+      if (this.hasAttribute(attribute)) throw new Error(legacyPromptMessage(attribute));
+      const kinds = promptKinds.filter(kind => this.hasAttribute(`${attribute}-${kind}`));
+      if (kinds.length > 1) throw new Error(`Conflicting ${attribute} sources: use exactly one of ${kinds.map(kind => `${attribute}-${kind}`).join(", ")}.`);
+      if (!kinds.length) continue;
+      const kind = kinds[0];
+      const value = this.getAttribute(`${attribute}-${kind}`);
+      if (!value.trim() || new TextEncoder().encode(value).length > 128 * 1024) {
+        throw new Error(`${attribute}-${kind} must be a nonempty string of at most 128 KiB (UTF-8).`);
+      }
+      configuration[key] = { kind, value };
     }
     if (this.hasAttribute("tools")) configuration.tools = this.getAttribute("tools").split(",").map(name => name.trim()).filter(Boolean);
     if (this.hasAttribute("repeat-delay")) configuration.repeatDelayMs = Number(this.getAttribute("repeat-delay"));
@@ -68,7 +84,7 @@ export class PAgent extends HTMLElement {
   }
 
   get canSubmit() {
-    if (!this.connected || this.state.busy || connection.reloading || connection.executionState === "stopped") return false;
+    if (!this.connected || this.state.busy || connection.reloading || ["pausing", "paused", "stopped"].includes(connection.executionState)) return false;
     try { connection.validate(this); return true; } catch { return false; }
   }
   get status() {
@@ -125,6 +141,7 @@ export class PAgent extends HTMLElement {
     if (!this.connected) throw new Error("The native connection is not ready.");
     if (connection.reloading) throw new Error("Wait for workspace reload to finish before submitting.");
     if (connection.executionState === "stopped") throw new Error("Execution has stopped; restart the host for another run.");
+    if (["pausing", "paused"].includes(connection.executionState)) throw new Error("Execution is paused; only the host operator can continue it.");
     if (this.state.busy) throw new Error("Agent is busy. Wait for this response or cancel it before submitting.");
   }
 
@@ -277,6 +294,11 @@ export class PAgent extends HTMLElement {
         this.state.busy = true;
         this.ensureTurn(run.inputId).output.apply({ type: "status", status: "running" }, record.seq);
       }
+    } else if (event.type === "turn-prompts") {
+      if (!record.runId || !record.requestId || record.agentId !== this.identity || record.runId !== this.state.run?.id || record.requestId !== this.state.run?.inputId) return;
+      const { output } = this.ensureTurn(record.requestId);
+      output.state.prompts = clone(event.prompts);
+      output.persist();
     } else if (event.type === "status") {
       if (event.model) this.state.model = event.model;
       if (event.status === "running") {

@@ -48,12 +48,14 @@ export const connection = {
     }
     this.validate(agent);
     if (original === agent) return;
+    // Invalid declarations must not reserve an identity or poison the ready list.
+    const configuration = agent.configuration;
     pinPersistence(agent);
     agent.identity = agent.id;
     identities.set(agent.id, agent);
     if (this.started) {
       agent.connected = this.live;
-      this.send({ type: "register", ...agent.configuration });
+      this.send({ type: "register", ...configuration });
     }
   },
 
@@ -127,7 +129,7 @@ export const connection = {
   connect() {
     if (this.started) return;
     if (!window.aos) {
-      for (const agent of this.agents) agent.notice("Open this workspace in its controlled browser tab to connect. This saved document is still readable and editable.", true);
+      for (const agent of identities.values()) agent.notice("Open this workspace in its controlled browser tab to connect. This saved document is still readable and editable.", true);
       return;
     }
     const after = this.lastSeq;

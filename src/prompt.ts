@@ -25,8 +25,9 @@ export function buildSystemPrompt(browser: BrowserKind, capabilities: PromptCapa
   if (tools.includes("wait")) paragraphs.push("Join run IDs with wait({runs:[runId]}), which waits on the host without occupying the browser queue. Waiting or polling for agent completion inside console can deadlock that queue.");
   if (tools.some(name => name.startsWith("web_"))) paragraphs.push("Web research tools use pi-browser with host-configured Codex/browser retrieval. Results have agent-scoped snapshot IDs. web_read reads saved evidence without networking; continue bounded text with nextCursor and the same ID/format. Research uses a separate browser; attention requests require human Continue/Cancel.");
   paragraphs.push(capabilities.network === "local" ? "Browser networking is restricted to this workspace's own origin. External sites and imports are unavailable." : "Ordinary browser networking follows browser origin and CORS rules.");
-  if (tools.includes("console")) paragraphs.push(browser === "firefox"
-    ? "Firefox console accepts Promise expressions or async IIFEs, not bare top-level await or lexical redeclaration; cancelling or timing out a running evaluation restarts the workspace browser, losing unsaved DOM and runtime state for every agent in this page."
-    : "Chromium console supports REPL top-level await and let redeclaration; cancelling or timing out a running evaluation terminates JavaScript in place.");
+  if (tools.includes("console")) paragraphs.push((browser === "firefox"
+    ? "Firefox console accepts Promise expressions or async IIFEs, not bare top-level await or lexical redeclaration; ordinary cancellation or timeout of a running evaluation restarts the workspace browser, losing unsaved DOM and runtime state for every agent in this page."
+    : "Chromium console supports REPL top-level await and let redeclaration; ordinary cancellation or timeout of a running evaluation terminates JavaScript in place.") +
+    " An optional host deadline pause detaches running console code without resetting the page; already-started JavaScript may keep running, but inference requires explicit host continuation.");
   return paragraphs.join("\n\n");
 }
