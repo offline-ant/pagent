@@ -151,6 +151,7 @@ export interface EngineOptions {
   /** Stops model and tool dispatch independently of page cooperation. */
   blocked?: () => boolean;
   browserKind?: BrowserKind;
+  /** This agent's research browser profile; without it, web tools have no browser backend. */
   webProfileDir?: string;
   /** Private agent-scoped evidence; retained independently of engine/browser lifetime. */
   webSnapshotDirectory?: string;

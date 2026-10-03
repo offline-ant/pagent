@@ -199,7 +199,7 @@ for (const engine of ["chromium", "firefox"] as const) {
       { type: "error", message: "Old error" },
       { type: "status", status: "running", model: "stale/model" },
       { type: "web-progress", message: "Old progress" },
-      { type: "web-attention", request: { id: "old", reason: "Old challenge", url, tabId: "old" } },
+      { type: "web-attention", request: { id: "old", reason: "Old challenge", url, tab: "old" } },
       { type: "message", phase: "end", message: followupAnswer },
       { type: "tool", phase: "start", callId: "old", name: "console" },
       ...["running", "waiting", "complete", "error"].map(status => ({ type: "run", run: { id: followupRun, agentId: "research", inputId: followupInput, status, result: "Stale result" } })),
@@ -282,7 +282,7 @@ for (const engine of ["chromium", "firefox"] as const) {
     assert.equal(await value("main.state.notice"), "Native transport unavailable");
 
     await connected("research");
-    const challenge = { id: "challenge-1", reason: "<img src=x onerror='window.pwned=true'> Complete CAPTCHA", url: "https://example.com/challenge", tabId: "research-1" };
+    const challenge = { id: "challenge-1", reason: "<img src=x onerror='window.pwned=true'> Complete CAPTCHA", url: "https://example.com/challenge", tab: "example.com+9" };
     await emit({ type: "web-progress", message: "Codex unavailable; using research browser." }, "research");
     await emit({ type: "web-attention", request: challenge }, "research");
     assert.equal(await value("research.status"), "waiting");

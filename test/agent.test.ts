@@ -7,8 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fauxAssistantMessage, fauxToolCall, InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createFakeModel, prepareFakeResponse } from "../src/fake-model.ts";
-import { createWebTools } from "pi-browser/web";
-import { BrowserProcessLauncher, type BrowserOptions } from "pi-browser";
+import { BrowserClient, createWebTools, type BrowserSource } from "pi-browser/web";
 import { createEngine, validateHistory } from "../src/agent.ts";
 import { buildSystemPrompt } from "../src/prompt.ts";
 import type { AgentEvent, EngineOptions, PageBrowser } from "../src/protocol.ts";
@@ -253,9 +252,8 @@ test("explicit Codex authentication failures are tool errors and cancellation re
   } finally { await engine.close(); }
 });
 
-test("research honors environment settings unless a host explicitly overrides headless mode", async t => {
-  const environment = { PI_WEB_BACKEND: process.env.PI_WEB_BACKEND, PI_WEB_BROWSER: process.env.PI_WEB_BROWSER,
-    PI_BROWSER_HEADLESS: process.env.PI_BROWSER_HEADLESS };
+test("research uses the workspace engine in the agent profile and honors headless environment unless the host overrides it", async t => {
+  const environment = { PI_WEB_BACKEND: process.env.PI_WEB_BACKEND, PI_BROWSER_HEADLESS: process.env.PI_BROWSER_HEADLESS };
   process.env.PI_WEB_BACKEND = "browser";
   process.env.PI_BROWSER_HEADLESS = "true";
   t.after(() => {
@@ -263,24 +261,24 @@ test("research honors environment settings unless a host explicitly overrides he
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
   });
-  const launches: BrowserOptions[] = [];
-  t.mock.method(BrowserProcessLauncher, "create", async (options: BrowserOptions) => {
-    launches.push(options);
+  const sources: BrowserSource[] = [];
+  t.mock.method(BrowserClient.prototype, "open", async function (this: BrowserClient) {
+    sources.push(this.source);
     throw new Error("Test stopped before browser launch");
   });
+  const profile = join(tmpdir(), "pagent-research-profile");
   for (const explicit of [false, true]) {
-    if (explicit) process.env.PI_WEB_BROWSER = "chromium";
-    else delete process.env.PI_WEB_BROWSER;
     const { options } = harness(tmpdir());
     options.browserKind = "firefox";
+    options.webProfileDir = profile;
     if (explicit) options.webHeadless = false;
     const engine = await createEngine(options);
     try { await engine.submit({ id: `settings-${explicit}`, prompt: "/fake-fetch http://127.0.0.1/fixture", history: [] }); }
     finally { await engine.close(); }
   }
-  assert.deepEqual(launches.map(options => ({ browser: options.browser, headless: options.headless })), [
-    { browser: "firefox", headless: true }, // Workspace engine default, environment headless.
-    { browser: "chromium", headless: false }, // Explicit environment engine and host headless.
+  assert.deepEqual(sources, [
+    { browser: "firefox", profileDir: join(profile, "firefox"), headless: true }, // Environment headless.
+    { browser: "firefox", profileDir: join(profile, "firefox"), headless: false }, // Explicit host headless.
   ]);
 });
 

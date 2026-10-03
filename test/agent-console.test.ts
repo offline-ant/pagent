@@ -37,9 +37,9 @@ test("web fallback and intervention diagnostics are visible without leaking host
   assert.equal(progress[0].level, "info");
   assert.match(progress[0].text, /Codex unavailable; using browser/);
   const attention = agentConsoleEntries({ seq: 2, event: { type: "web-attention", request: {
-    id: "request-1", reason: "Complete the challenge", url: "https://example.com", tabId: "research-1",
+    id: "request-1", reason: "Complete the challenge", url: "https://example.com", tab: "example.com+9",
   } } });
-  assert.match(attention[0].text, /Complete the challenge https:\/\/example.com \(tab research-1\)/);
+  assert.match(attention[0].text, /Complete the challenge https:\/\/example.com \(tab example\.com\+9\)/);
   assert.deepEqual(agentConsoleEntries({ seq: 3, event: { type: "web-attention", request: null } }), []);
 });
 

@@ -54,7 +54,7 @@ export function agentConsoleEntries({ seq, agentId, requestId, event }: HostEven
       break;
     }
     case "web-attention":
-      if (event.request) add("info", "web attention", `${event.request.reason} ${event.request.url} (tab ${event.request.tabId})`);
+      if (event.request) add("info", "web attention", `${event.request.reason} ${event.request.url} (tab ${event.request.tab})`);
       break;
     case "web-progress": add("info", "web", event.message); break;
     case "error": add("error", "error", event.message); break;

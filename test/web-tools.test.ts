@@ -6,7 +6,7 @@ import type { AgentEvent } from "../src/protocol.ts";
 import { WebAttentionCoordinator } from "../src/web-tools.ts";
 
 const request: WebAttention = {
-  id: "web-attention-1", reason: "Complete the challenge", url: "https://example.com/challenge", tabId: "research-1",
+  id: "web-attention-1", reason: "Complete the challenge", url: "https://example.com/challenge", tab: "example.com+9",
 };
 
 function coordinator() {
@@ -16,14 +16,15 @@ function coordinator() {
 
 test("web integration imports pi-browser factories without discovering extensions or sibling source", async () => {
   const source = await readFile(new URL("../src/agent.ts", import.meta.url), "utf8");
-  assert.match(source, /import \{ createWebTools, SnapshotStore \} from "pi-browser\/web"/);
-  assert.match(source, /\.\.\.web\.tools/);
+  assert.match(source, /import \{ BrowserClient, browserHeadless, createWebTools, SnapshotStore, resolveWebSettings, type WebBackendState \} from "pi-browser\/web"/);
+  assert.match(source, /\.\.\.\(web\?\.tools \?\? \[\]\)/);
   assert.doesNotMatch(source, /pi-ant|loadWebTools|DefaultResourceLoader|additionalExtensionPaths/);
   const agents = await readFile(new URL("../src/session-agents.ts", import.meta.url), "utf8");
   assert.match(agents, /webProfileDir: join\(this\.options\.stateDirectory, "research", createHash\("sha256"\)\.update\(id\)\.digest\("hex"\)\)/);
   assert.match(agents, /webSnapshotDirectory: join\(this\.options\.stateDirectory, "web-snapshots", createHash\("sha256"\)\.update\(id\)\.digest\("hex"\)\)/);
   assert.match(source, /snapshots: new SnapshotStore\(\{ directory: options.webSnapshotDirectory \}\)/);
-  assert.match(source, /finally \{ await web\.close\(\); \}/);
+  assert.match(source, /idleMs: 0/, "each agent's research broker exits with its engine");
+  assert.match(source, /finally \{ await research\?\.close\(\); \}/);
 });
 
 test("Continue resolves the active intervention and clears it without browser navigation", async () => {

@@ -1,18 +1,15 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
-import { BrowserProcessLauncher, type NativeBrowserProcess } from "pi-browser";
-import { Bidi, object, remoteValue } from "pi-browser/bidi";
-import { Cdp } from "pi-browser/cdp";
 import type { WebAttention } from "pi-browser/web";
 import { startPagent, type PagentApp } from "../src/app.ts";
 import { validateHistory } from "../src/agent.ts";
 import type { HostEvent } from "../src/protocol.ts";
+import { brokerExit, isolateBrokers, ResearchObserver, researchProfile } from "./research.ts";
 
 async function until(app: PagentApp, expression: string): Promise<void> {
   const deadline = Date.now() + 20_000;
@@ -29,20 +26,12 @@ async function attention(app: PagentApp, id: string): Promise<WebAttention> {
 }
 
 for (const research of ["chromium", "firefox"] as const) {
-  test(`${research} research and attention are independent for nested agents in one workspace`, { timeout: 110_000 }, async t => {
+  test(`${research} research and attention are independent for nested agents in one workspace`, { timeout: 110_000 }, async () => {
     const directory = await mkdtemp(join(tmpdir(), `pagent-agents-web-${research}-`));
-    const environment = {
-      PI_WEB_BACKEND: process.env.PI_WEB_BACKEND,
-      PI_WEB_BROWSER: process.env.PI_WEB_BROWSER,
-      PI_BROWSER_HEADLESS: process.env.PI_BROWSER_HEADLESS,
-      PI_WEB_PROFILE_DIR: process.env.PI_WEB_PROFILE_DIR,
-      PI_BROWSER_EXECUTABLE: process.env.PI_BROWSER_EXECUTABLE,
-    };
+    const restoreTmpdir = isolateBrokers(directory);
+    const environment = { PI_WEB_BACKEND: process.env.PI_WEB_BACKEND, PI_BROWSER_HEADLESS: process.env.PI_BROWSER_HEADLESS };
     process.env.PI_WEB_BACKEND = "browser";
-    process.env.PI_WEB_BROWSER = research;
     process.env.PI_BROWSER_HEADLESS = "true";
-    delete process.env.PI_WEB_PROFILE_DIR;
-    delete process.env.PI_BROWSER_EXECUTABLE;
     const requests = new Map<string, number>();
     const server = createServer((request, response) => {
       const url = request.url ?? "/";
@@ -55,55 +44,21 @@ for (const research of ["chromium", "firefox"] as const) {
     assert(address && typeof address !== "string");
     const origin = `http://127.0.0.1:${address.port}`;
     const logs: string[] = [];
-    const cdpConnections = new Map<string, Cdp>();
+    const observers = new Map<string, ResearchObserver>();
     let app: PagentApp | undefined;
     try {
       app = await startPagent({ directory, browser: research, port: 0, headless: true, fake: true,
         noSandbox: research === "chromium" && process.env.PAGENT_TEST_NO_SANDBOX === "1", log: message => logs.push(message) });
       const workspace = app;
-      // Observe actual disposable research processes and transports, not mocked web results.
-      // Install after workspace startup so the workspace process cannot count as research.
-      const launches: NativeBrowserProcess[] = [];
-      const originalStart = BrowserProcessLauncher.prototype.start;
-      t.mock.method(BrowserProcessLauncher.prototype, "start", async function (this: BrowserProcessLauncher) {
-        const runtime = await originalStart.call(this);
-        launches.push(runtime);
-        return runtime;
-      });
-      const bidiConnections = new Map<string, Bidi>();
-      const originalConnect = Bidi.connect;
-      t.mock.method(Bidi, "connect", async (endpoint: string, timeout?: number) => {
-        const connection = await originalConnect(endpoint, timeout);
-        bidiConnections.set(endpoint, connection);
-        return connection;
-      });
-      const processes = new Map<string, NativeBrowserProcess>();
-      async function evaluateResearch(id: string, tabId: string, expression: string): Promise<unknown> {
-        const runtime = processes.get(id);
-        assert(runtime);
-        if (research === "firefox") {
-          const bidi = bidiConnections.get(runtime.endpoint);
-          assert(bidi);
-          const result = await bidi.request("script.evaluate", { expression, target: { context: tabId }, awaitPromise: true, resultOwnership: "none" });
-          assert.notEqual(result.type, "exception", JSON.stringify(result));
-          return remoteValue(result.result);
-        }
-        let cdp = cdpConnections.get(tabId);
-        if (!cdp) {
-          const endpoint = new URL(runtime.endpoint);
-          const targets: unknown = await (await fetch(`http://${endpoint.host}/json/list`)).json();
-          assert(Array.isArray(targets));
-          const target = targets.map(object).find(target => target.id === tabId);
-          assert.equal(typeof target?.webSocketDebuggerUrl, "string");
-          cdp = await Cdp.connect(target!.webSocketDebuggerUrl as string);
-          cdpConnections.set(tabId, cdp);
-        }
-        const result = await cdp.request("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
-        assert(!result.exceptionDetails, JSON.stringify(result));
-        return object(result.result).value;
+      // Each agent's research broker also accepts this observer, acting as the person at its research window.
+      function evaluateResearch(id: string, tab: string, expression: string): Promise<unknown> {
+        let observer = observers.get(id);
+        if (!observer) observers.set(id, observer = new ResearchObserver(workspace.stateDirectory, id, research));
+        return observer.evaluate(tab, expression);
       }
+      const browserPid = async (id: string) => (JSON.parse(await readFile(join(researchProfile(workspace.stateDirectory, id, research), ".pi-browser-owner", "owner.json"), "utf8")) as { browserPid: number; browser: string });
       async function correct(id: string, request: WebAttention): Promise<void> {
-        await evaluateResearch(id, request.tabId, `(() => {
+        await evaluateResearch(id, request.tab, `(() => {
           document.title = 'Local article ${id}';
           document.body.innerHTML = '<main><h1>Verified article ${id}</h1><p>Corrected content for ${id} only.</p></main>';
           window.humanCorrection = ${JSON.stringify(id)};
@@ -115,7 +70,7 @@ for (const research of ["chromium", "firefox"] as const) {
         const fetched = history.findLast(message => message.role === "toolResult" && message.toolName === "web_fetch");
         assert(fetched?.role === "toolResult" && !fetched.isError, JSON.stringify(fetched));
         assert.match(JSON.stringify(fetched.content), new RegExp(`Corrected content for ${id} only`));
-        assert.equal(await evaluateResearch(id, request.tabId, "window.humanCorrection"), id);
+        assert.equal(await evaluateResearch(id, request.tab, "window.humanCorrection"), id);
         assert.equal(requests.get(`/${id}`), 1, "Continue and retry retain the original research DOM without navigation");
       }
 
@@ -140,23 +95,20 @@ for (const research of ["chromium", "firefox"] as const) {
       assert.notEqual(alpha.id, beta.id, "each agent owns separate intervention authority");
       assert.equal(alpha.url, `${origin}/alpha`);
       assert.equal(beta.url, `${origin}/beta`);
-      assert.equal(launches.length, 2, "both web calls launch concurrently despite another pending intervention");
+      const pids = new Map<string, number>();
       for (const [id, request] of [["alpha", alpha], ["beta", beta]] as const) {
         assert.equal(await app.browser.evaluateValue(`$('#${id}').parentElement.localName`), "div");
         assert.equal(app.agents.get(id)!.busy, true);
-        const profile = join(app.stateDirectory, "research", createHash("sha256").update(id).digest("hex"), research);
-        const owner = JSON.parse(await readFile(join(profile, ".pi-browser-owner", "owner.json"), "utf8")) as { browserPid: number };
-        const runtime = launches.find(runtime => runtime.child.pid === owner.browserPid);
-        assert(runtime, `${id}'s SHA256 profile is owned by its own real research process`);
-        assert.equal(runtime.kind, research);
-        processes.set(id, runtime);
-        assert.equal(await evaluateResearch(id, request.tabId, "typeof window.aos"), "undefined");
+        const owner = await browserPid(id);
+        assert.equal(owner.browser, research, `${id}'s SHA256 profile is owned by its own research browser of the workspace engine`);
+        pids.set(id, owner.browserPid);
+        assert.equal(await evaluateResearch(id, request.tab, "typeof window.aos"), "undefined");
         assert.equal(requests.get(`/${id}`), 1);
         const progress = await app.browser.evaluateValue(`$('#${id}').webProgress`);
         assert.equal(typeof progress, "string");
         assert.match(progress as string, new RegExp(`${origin}/${id}`));
       }
-      assert.notEqual(processes.get("alpha")!.child.pid, processes.get("beta")!.child.pid, "no shared profile/process ownership");
+      assert.notEqual(pids.get("alpha"), pids.get("beta"), "no shared profile/process ownership");
       assert.equal(await app.browser.evaluateValue("$('#main').webAttention"), null);
       assert.equal(await app.browser.evaluateValue("$('#main').webProgress"), "");
       const betaProgress = await app.browser.evaluateValue("$('#beta').webProgress");
@@ -176,7 +128,7 @@ for (const research of ["chromium", "firefox"] as const) {
       assert.deepEqual(await attention(app, "beta"), beta);
       assert.equal(app.agents.get("alpha")!.busy, true);
       assert.equal(app.agents.get("beta")!.busy, true);
-      assert.equal(launches.length, 2);
+      for (const id of ["alpha", "beta"]) assert.equal((await browserPid(id)).browserPid, pids.get(id));
 
       // A valid peer attention ID is not authority to continue or cancel this agent.
       await app.browser.evaluateValue(`aos.send({type:'web-continue',agentId:'alpha',id:${JSON.stringify(beta.id)}})`);
@@ -196,14 +148,14 @@ for (const research of ["chromium", "firefox"] as const) {
       assert.equal(await app.browser.evaluateValue("$('#alpha').webProgress"), "");
       assert.deepEqual(await attention(app, "beta"), beta);
       assert.equal(await app.browser.evaluateValue("$('#beta').webProgress"), betaProgress);
-      assert.equal(await evaluateResearch("alpha", alpha.tabId, "document.title"), "Captcha fixture", "cancel preserves alpha's research tab");
+      assert.equal(await evaluateResearch("alpha", alpha.tab, "document.title"), "Captcha fixture", "cancel preserves alpha's research tab");
 
       // Reset before another invocation: no Codex credentials or service are ever used.
       await app.browser.evaluateValue("aos.send({type:'backend-set',override:null})");
       await until(app, "pagent.agents.every(a => a.webBackend?.override === null && a.webBackend.effective === 'browser')");
       await app.browser.evaluateValue(`$('#alpha').prompt(${JSON.stringify(`/fake-fetch ${origin}/alpha`)})`);
       const resumed = await attention(app, "alpha");
-      assert.equal(resumed.tabId, alpha.tabId);
+      assert.equal(resumed.tab, alpha.tab);
       assert.notEqual(resumed.id, alpha.id);
       assert.deepEqual(await attention(app, "beta"), beta);
       await correct("alpha", resumed);
@@ -212,7 +164,7 @@ for (const research of ["chromium", "firefox"] as const) {
       assert.equal(app.agents.get("beta")!.busy, true);
       await correct("beta", beta);
       assert.equal(app.busy, false);
-      assert.equal(launches.length, 2, "backend updates and retry preserve both research processes");
+      for (const id of ["alpha", "beta"]) assert.equal((await browserPid(id)).browserPid, pids.get(id), "backend updates and retry preserve both research processes");
       assert.equal(await app.browser.evaluateValue("window.workspaceMarker"), "retained");
       assert.equal(await app.browser.evaluateValue("location.href"), app.url);
       assert.equal(await app.browser.evaluateValue("typeof aos.send"), "function");
@@ -234,13 +186,16 @@ for (const research of ["chromium", "firefox"] as const) {
       }
       assert.deepEqual(logs, []);
     } finally {
-      for (const connection of cdpConnections.values()) connection.close();
+      const brokersExited = await brokerExit(directory);
+      for (const observer of observers.values()) await observer.close();
       await app?.close();
+      await brokersExited();
       server.closeAllConnections();
       await new Promise<void>(resolve => server.close(() => resolve()));
       for (const [key, value] of Object.entries(environment)) {
         if (value === undefined) delete process.env[key]; else process.env[key] = value;
       }
+      restoreTmpdir();
       await rm(directory, { recursive: true, force: true });
     }
   });

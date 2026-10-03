@@ -13,7 +13,8 @@ import {
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import type { Message } from "@earendil-works/pi-ai";
-import { createWebTools, SnapshotStore, resolveWebSettings, type WebBackendState } from "pi-browser/web";
+import { join } from "node:path";
+import { BrowserClient, browserHeadless, createWebTools, SnapshotStore, resolveWebSettings, type WebBackendState } from "pi-browser/web";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { prepareFakeResponse } from "./fake-model.ts";
@@ -227,13 +228,16 @@ async function createConfiguredEngine(options: EngineOptions, selected: EngineMo
   const configured = resolveWebSettings().backend;
   let backendState: WebBackendState = { configured, override: backendOverride, effective: backendOverride ?? configured,
     source: backendOverride !== null ? "override" : process.env.PI_WEB_BACKEND !== undefined ? "environment" : "default" };
-  const web = tools.some(name => name.startsWith("web_")) ? createWebTools({
-    profileDir: options.webProfileDir,
+  // Research uses the workspace engine in this agent's own profile; its broker exits with the engine.
+  const webTools = tools.some(name => name.startsWith("web_"));
+  const researchEngine = options.browserKind ?? "chromium";
+  const research = webTools && options.webProfileDir ? new BrowserClient({
+    source: { browser: researchEngine, profileDir: join(options.webProfileDir, researchEngine), headless: options.webHeadless ?? browserHeadless() },
+    session: options.agentId ?? "agent", idleMs: 0,
+  }) : undefined;
+  const web = webTools ? createWebTools({
+    ...(research ? { browser: () => research } : {}),
     snapshots: new SnapshotStore({ directory: options.webSnapshotDirectory }),
-    settings: {
-      ...(process.env.PI_WEB_BROWSER === undefined ? { browser: options.browserKind ?? "chromium" } : {}),
-      ...(options.webHeadless === undefined ? {} : { headless: options.webHeadless }),
-    },
     onAttention: options.onWebAttention,
     onProgress: message => options.emit({ type: "web-progress", message }),
   }) : undefined;
@@ -370,7 +374,10 @@ async function createConfiguredEngine(options: EngineOptions, selected: EngineMo
         await backendUpdates;
         await activeSession?.abort();
         await running?.catch(() => {});
-      } finally { await web?.close(); }
+      } finally {
+        try { await web?.close(); }
+        finally { await research?.close(); }
+      }
     },
   };
 }

@@ -546,9 +546,12 @@ executes only when loaded in the browser, never on the host.
 
 ## Web research
 
-Research uses separate browser processes and per-agent profiles under
-`.pagent/research/<sha256(agentId)>/`. It never navigates the workspace page or
-installs its `aos` bridge in external pages. Codex retrieval needs Pi's OpenAI
+Each agent researches in its own browser of the workspace engine, with a stable
+profile under `.pagent/research/<sha256(agentId)>/`. Pi-browser's broker holds
+that browser for the agent and closes it when the agent's engine closes. Research
+never navigates the workspace page or installs its `aos` bridge in external pages.
+Research tabs are named automatically (host without `www.` plus `+<length>` of the
+rest of the URL); attention requests report that name. Codex retrieval needs Pi's OpenAI
 Codex OAuth independently of the inference provider. Browser retrieval needs no
 Codex login, but Pagent still requires an authenticated inference model.
 
@@ -566,20 +569,16 @@ PI_WEB_BACKEND=codex pagent ./          # Codex only; no fallback
 Auto falls back for unavailable credentials/service/transport, rate limits, and
 service failures—not invalid inputs, malformed responses, or cancellation.
 `PI_WEB_SEARCH_ENGINE=duckduckgo|bing|brave` selects the search engine.
-`PI_WEB_BROWSER=chromium|firefox` overrides the research engine; otherwise it
-follows the workspace engine. `PI_BROWSER_EXECUTABLE` overrides its executable.
-`PI_BROWSER_HEADLESS=true|false` controls research visibility unless an explicit
-host headless option was supplied. `PI_WEB_PROFILE_DIR` overrides the profile
-root but is not partitioned per agent: a second owner fails explicitly.
+Research always follows the workspace engine. `PI_BROWSER_HEADLESS=true|false`
+controls research visibility unless an explicit host headless option was supplied.
 
 On a CAPTCHA, consent dialog, login, or unreadable page, the research window is
 focused and the agent displays Continue/Cancel controls. Resolve it manually;
 Continue extracts the same page without reloading. Cancelling the wait preserves
-the page. Cancelling running evaluation can close the Chromium research tab or
-stop the Firefox research process, never the workspace process. Headed is the
-default; missing display access is an error, not a silent headless fallback.
-Research retains three recent completed tabs, at most eight total, and never
-evicts unfinished checks.
+the page. Cancelling running evaluation closes only that research tab, never the
+workspace process. Headed is the default; missing display access is an error,
+not a silent headless fallback. Research keeps the agent's ten most recently
+used tabs and closes older ones.
 
 Private evidence lives in `.pagent/web-snapshots/<sha256(agentId)>/`, retained
 across restart and same-ID recreation. Agents cannot read another agent's IDs.
