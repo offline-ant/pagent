@@ -5,7 +5,7 @@ an ordinary directory. The page owns its editors, conversation records, tool
 display, working memory, and interaction policy. Agents can edit those files and
 the live DOM.
 
-Pagent is a standalone Node **24+** CLI, not a Pi extension. It uses Pi **0.99.1**
+Pagent is a standalone Node **24+** CLI, not a Pi extension. It uses Pi **1.0.2**
 and the bundled `pi-browser` library for Firefox/WebDriver BiDi and Chromium/CDP.
 No sibling checkout or `pi-ant` package is required at runtime.
 
@@ -561,7 +561,8 @@ Codex, and Browser are explicit choices. Changes affect subsequent calls only;
 they do not cancel work, replace processes, or reroute active research.
 
 ```sh
-pagent ./                              # Codex first; reported browser fallback
+pagent ./                              # Browser research only by default
+PI_WEB_BACKEND=auto pagent ./           # Codex first; reported browser fallback
 PI_WEB_BACKEND=browser pagent ./        # Browser research only
 PI_WEB_BACKEND=codex pagent ./          # Codex only; no fallback
 ```

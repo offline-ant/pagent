@@ -147,6 +147,12 @@ test("cancel during a pending fake request settles and rejects concurrent submis
 
 for (const fake of [true, false]) {
   test(`${fake ? "fake" : "real"} runtime executes pi-browser web tools, emits results, and restores web history without network`, async t => {
+    const backend = process.env.PI_WEB_BACKEND;
+    process.env.PI_WEB_BACKEND = "codex";
+    t.after(() => {
+      if (backend === undefined) delete process.env.PI_WEB_BACKEND;
+      else process.env.PI_WEB_BACKEND = backend;
+    });
     const cwd = await mkdtemp(join(tmpdir(), "pagent-agent-web-"));
     const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
     process.env.PI_CODING_AGENT_DIR = cwd;
