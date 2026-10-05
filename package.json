@@ -29,9 +29,9 @@
     "check": "tsc --noEmit && node --check template/agent.js && node --check template/agent-output.js && node --check template/dom.js && node --check template/paragraphs.js && node --check template/p-agent.js && node --check template/user-input.js && node --check template/agent-connection.js && node --check template/agent-controls.js && node --check template/agent-persistence.js"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "1.0.2",
-    "@earendil-works/pi-ai": "1.0.2",
-    "@earendil-works/pi-coding-agent": "1.0.2",
+    "@earendil-works/pi-agent-core": "1.0.4",
+    "@earendil-works/pi-ai": "1.0.4",
+    "@earendil-works/pi-coding-agent": "1.0.4",
     "parse5": "8.0.0",
     "pi-browser": "file:vendor/pi-browser-0.1.0.tgz",
     "typebox": "1.3.27"
